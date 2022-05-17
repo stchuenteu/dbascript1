@@ -1,0 +1,31 @@
+use master
+create database SReplication
+
+use SReplication
+CREATE TABLE Department
+(
+ID INT PRIMARY KEY,
+Name VARCHAR(50)
+)
+GO
+-- Populate the Department Table with test data
+INSERT INTO Department VALUES(1, 'IT')
+INSERT INTO Department VALUES(2, 'HR')
+INSERT INTO Department VALUES(3, 'Sales')
+
+
+USE MASTER 
+ create database SRep;
+
+ Use SRep
+CREATE TABLE Department
+(
+ID INT PRIMARY KEY,
+Name VARCHAR(50)
+);
+GO
+-- Populate the Department Table with test data
+ Use SRep
+INSERT INTO Department VALUES(1, 'IT')
+INSERT INTO Department VALUES(2, 'HR')
+INSERT INTO Department VALUES(3, 'Sales');
