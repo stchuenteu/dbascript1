@@ -1,0 +1,431 @@
+1. GET COMMAND EXECUTION PERCENTAGE
+
+SELECT 
+   session_id as SPID, command, a.text AS Query, start_time, percent_complete,
+   dateadd(second,estimated_completion_time/1000, getdate()) as estimated_completion_time
+FROM sys.dm_exec_requests r 
+   CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) a 
+WHERE r.command LIKE %comand name%
+
+
+REPLICATION
+--1. Set replication size to unlimited
+
+EXEC sp_configure 'show advanced options', 1 ;
+
+RECONFIGURE ;
+GO
+
+EXEC sp_configure 'max text repl size', -1 ;
+GO
+
+RECONFIGURE;
+GO
+
+
+--2. Run this to Check  identified colunm if set for replication or not .
+
+SELECT  
+        @@Servername [Server],
+        DB_NAME() [Database] ,
+        QUOTENAME(SCHEMA_NAME(t.schema_id)) as SchemaName,  
+        QUOTENAME(t.name) AS TableName,
+        c.name AS ColumnName,
+        c.object_id as ObjectID,
+        c.is_not_for_replication,
+        'EXEC sys.sp_identitycolumnforreplication '+cast(c.object_id as varchar(20)) + ', 1 ;  -- [' + t.name + ']' as CommandTORun_SetIdendityNOTForReplication ,
+        'EXEC sys.sp_identitycolumnforreplication '+cast(c.object_id as varchar(20)) + ', 0 ;  -- [' + t.name + ']'  as CommandTORun_SetIdendityFORReplication
+    FROM    sys.identity_columns AS c
+        INNER JOIN  sys.tables AS t ON t.[object_id] = c.[object_id]
+        WHERE   c.is_identity = 1
+
+       order by TableName
+
+
+	1. Removed Replication
+
+Use master
+Go
+sp_removedbreplication 'DBName'
+go
+
+LOG SHIPPING
+----Backup jobs
+EXEC MSDB..sp_start_job @job_name = 'LSBackup_FLXLKP'      ---Backup jobs Name from source server
+
+
+
+---Copy jobs
+EXEC MSDB..sp_start_job @job_name = 'LSCopy_MISDB004CMITC1\MISDB004CMITC1_FLXLKP'    --- 'LSCopy_MISDB004CMITC1\MISDB004CMITC1_FLXLKP' is copy jobs Name from Target server
+
+
+--Restore jobs
+EXEC MSDB..sp_start_job @job_name = 'LSRestore_MISDB004CMITC1\MISDB004CMITC1_FLXLKP' ---- 'LSRestore_MISDB004CMITC1\MISDB004CMITC1_FLXLKP' restore jobs Name from Target server
+
+
+--Bring db online
+USE master
+Go
+Restore database [DatabaseName] with RECOVERY    
+
+Generale
+--Check server name and change(Split brain)
+Check and change server name
+Split brain
+Select * from sys.servers
+
+
+EXEC sp_dropserver '<old_name>'; 
+GO 
+
+EXEC sp_addserver '<new_name>', local; 
+GO
+
+--Configure max degree of parallelism with T-SQL
+USE <DatabaseName> ; 
+GO 
+EXEC sp_configure 'show advanced options', 1;  
+GO  
+RECONFIGURE WITH OVERRIDE;  
+GO  
+EXEC sp_configure 'max degree of parallelism', 16;  
+GO  
+RECONFIGURE WITH OVERRIDE;  
+GO  
+
+PERFORMANCE COUNTER
+
+2. Check Buffer Hit ratio
+SELECT counter_name as CounterName, (a.cntr_value * 1.0 / b.cntr_value) * 100.0 as BufferCacheHitRatio FROM sys.dm_os_performance_counters  
+a JOIN  (SELECT cntr_value,OBJECT_NAME FROM sys.dm_os_performance_counters WHERE 
+counter_name = 'Buffer cache hit ratio base' AND OBJECT_NAME LIKE '%Buffer Manager%') 
+b ON  a.OBJECT_NAME = b.OBJECT_NAME WHERE a.counter_name =
+ 'Buffer cache hit ratio' AND a.OBJECT_NAME LIKE '%Buffer Manager%'
+
+3. Page life expectancy
+
+SELECT [object_name],
+[counter_name],
+[cntr_value] FROM sys.dm_os_performance_counters
+WHERE [object_name] LIKE '%Manager%'
+AND [counter_name] = 'Page life expectancy'
+
+4. Performance compter
+
+select * from sys.dm_os_performance_counters 
+
+
+BACKUP DATABASE AND TABLE
+
+5. Backup table
+
+SELECT *
+INTO DBA.dbo.New table Name
+FROM [Main database].[dbo].[TableName]nolock
+WHERE [date] between cast('2022-03-01' as datetime)
+ AND cast('2022-03-31' as datetime)
+
+
+6. Backup Full
+BACKUP DATABASE testDB
+TO DISK = 'D:\backups\testDB.bak';
+
+7. Differential backup
+BACKUP DATABASE testDB
+TO DISK = 'D:\backups\testDB.bak'
+WITH DIFFERENTIAL;
+
+8. Trnsaction Log backup
+BACKUP LOG [database] TO DISK ='filepath\filename.trn'
+
+9. Tail-log backup
+USE master;
+GO
+-- create a tail-log backup
+BACKUP LOG [SQLShackDemoATC]
+TO DISK = 'f:\PowerSQL\SQLShackDemoATCTailLog.log'
+WITH CONTINUE_AFTER_ERROR;
+GO
+
+10. BACKUP Table
+
+Select *
+INTO Newtable
+From oldTable
+Where Condition.
+
+
+VIEWS
+
+CREATE OR REPLACE VIEW view_name AS
+SELECT column1, column2, ...
+FROM table_name
+WHERE condition;
+
+TABLE
+
+11. Insert Into 
+12. ---The INSERT INTO SELECT statement copies data from one table and inserts it into another table.
+INSERT INTO TargetTable (column1, column2, column3, ...)
+SELECT column1, column2, column3, ...
+FROM SourceTable
+WHERE condition;
+
+13. SQL Select into
+SELECT *
+INTO newtable [IN externaldb]
+FROM oldtable
+WHERE condition;
+
+14. SQL Select with Like
+SELECT * FROM Customers
+WHERE CustomerName LIKE '%or%';
+From <https://www.w3schools.com/sql/sql_like.asp> 
+
+15. ADD Primary Constraint
+ALTER TABLE tableName
+ADD CONSTRAINT constraintName PRIMARY KEY (column_1, column_2, ... column_n);
+
+
+JOBS
+
+16. Check enable and disable jobs
+
+Select * from MSDB..SYSJOBS
+
+17. ON or OFF Agent himself
+ EXEC xp_servicecontrol N'stop',N'SQLServerAGENT'
+EXEC xp_servicecontrol N'start',N'SQLServerAGENT'
+
+
+3. This will enable or disable a single jobs
+Exec msdb..sp_update_job @job_name ='Job Name', @enabled=0--Disable
+Exec msdb..sp_update_job @job_name ='Job Name', @enabled=1--Enable
+
+
+18. generate disable all jobs
+SELECT 'exec msdb..sp_update_job @job_name = '''+NAME+''', @enabled = 0' FROM msdb..sysjobs
+
+
+19. generate enable all jobs
+SELECT 'exec msdb..sp_update_job @job_name = '''+NAME+''', @enabled = 1' FROM msdb..sysjobs
+
+From <https://www.sqlservercentral.com/forums/topic/disable-all-the-sql-jobs-at-once> 
+
+20. Check last run day jobs
+
+select j.job_id,
+j.name,
+js.step_id,
+js.step_name,
+last_run_outcome = case when js.last_run_outcome = 0 then 'Failed'
+when js.last_run_outcome = 1 then 'Succeeded'
+when js.last_run_outcome = 2 then 'Retry'
+when js.last_run_outcome = 3 then 'Canceled'
+else 'Unknown'
+end,
+last_run_datetime = msdb.dbo.agent_datetime(
+case when js.last_run_date = 0 then NULL else js.last_run_date end,
+case when js.last_run_time = 0 then NULL else js.last_run_time end)
+from msdb.dbo.sysjobs j
+inner join msdb.dbo.sysjobsteps js
+on j.job_id = js.job_id;
+
+
+MEMORY
+
+21. see which database consumes the most memory
+
+SELECT
+CASE database_id
+WHEN 32767 THEN 'ResourceDb'
+ELSE db_name(database_id)
+END AS database_name, COUNT(1)/128 AS megabytes_in_cache
+FROM sys.dm_os_buffer_descriptors
+GROUP BY DB_NAME(database_id) ,database_id
+ORDER BY megabytes_in_cache DESC;
+
+From <https://blog.quest.com/buffer-cache-what-is-it-and-how-does-it-impact-database-performance/> 
+
+
+22. Identify the table or index that consumes the most memory
+SELECT COUNT(1)/128 AS megabytes_in_cache
+,name ,index_id
+FROM sys.dm_os_buffer_descriptors AS bd
+INNER JOIN
+(
+SELECT object_name(object_id) AS name
+,index_id ,allocation_unit_id
+FROM sys.allocation_units AS au
+INNER JOIN sys.partitions AS p
+ON au.container_id = p.hobt_id
+AND (au.type = 1 OR au.type = 3)
+UNION ALL
+SELECT object_name(object_id) AS name
+,index_id, allocation_unit_id
+FROM sys.allocation_units AS au
+INNER JOIN sys.partitions AS p
+ON au.container_id = p.partition_id
+AND au.type = 2
+) AS obj
+ON bd.allocation_unit_id = obj.allocation_unit_id
+WHERE database_id = DB_ID()
+GROUP BY name, index_id
+ORDER BY megabytes_in_cache DESC;
+
+CPU
+
+--Important note: the DMVs can only report on the data that's available in the plan cache.
+--1. Run this to create the scalar user function
+CREATE FUNCTION dbo.udf_Get_DB_Cpu_Pct (@dbName sysname)
+RETURNS decimal (6, 3)AS
+BEGIN
+ 
+   DECLARE @pct decimal (6, 3) = 0
+
+   SELECT @pct = T.[CPUTimeAsPercentage]
+   FROM
+    (SELECT 
+        [Database],
+        CONVERT (DECIMAL (6, 3), [CPUTimeInMiliSeconds] * 1.0 / 
+        SUM ([CPUTimeInMiliSeconds]) OVER () * 100.0) AS [CPUTimeAsPercentage]
+     FROM 
+      (SELECT 
+          dm_execplanattr.DatabaseID,
+          DB_Name(dm_execplanattr.DatabaseID) AS [Database],
+          SUM (dm_execquerystats.total_worker_time) AS CPUTimeInMiliSeconds
+       FROM sys.dm_exec_query_stats dm_execquerystats
+       CROSS APPLY 
+        (SELECT 
+            CONVERT (INT, value) AS [DatabaseID]
+         FROM sys.dm_exec_plan_attributes(dm_execquerystats.plan_handle)
+         WHERE attribute = N'dbid'
+        ) dm_execplanattr
+       GROUP BY dm_execplanattr.DatabaseID
+      ) AS CPUPerDb
+    )  AS T
+   WHERE T.[Database] = @dbName
+
+   RETURN @pct
+END
+GO
+
+--2. Report database CPU percentage for the master database
+USE master
+GO
+SELECT dbo.udf_Get_DB_Cpu_Pct ('master')
+GO
+
+--3. Report results for all databases in descending CPU usage order
+USE master
+GO
+SELECT d.name,dbo.udf_Get_DB_Cpu_Pct (d.name) as usagepct
+FROM sysdatabases d
+ORDER BY usagepct desc
+GO
+
+
+SHRINK DATABASE
+--0. Display all logical logNmae
+SELECT name FROM sys.master_files WHERE type_desc = 'LOG'
+
+--1. Check logical Name DATABASE FILES
+sp_helpdb[DBNAMES]
+
+--2. Put database in simple recovery mode
+    ALTER DATABASE [FLXMI2]  SET RECOVERY SIMPLE  
+        GO
+
+--3. Shrink Files
+        DBCC SHRINKFILE (2, 10)
+        GO
+
+--4. Put database back to Full recovery mode
+    ALTER DATABASE [FLXMI2]    SET RECOVERY FULL
+
+
+--0. Display all logical logNmae
+SELECT name FROM sys.master_files WHERE type_desc = 'LOG'
+
+
+GENERAL COMAND
+--1. Check performance counter
+select * from sys.dm_os_performance_counters 
+
+-- Script to make the database readonly
+USE [master]
+GO
+ALTER DATABASE [DBName] SET  READ_ONLY WITH NO_WAIT
+GO
+ALTER DATABASE [DBName] SET  READ_ONLY 
+GO
+-- Script to take the database offline
+ALTER DATABASE [DBName] SET OFFLINE WITH
+ROLLBACK IMMEDIATE
+
+From <https://www.mssqltips.com/sqlservertip/1936/sql-server-database-migration-checklist/> 
+
+--Check logical Name DATABASE
+
+SELECT d.name DatabaseName, f.name LogicalName,
+f.physical_name AS PhysicalName,
+f.type_desc TypeofFile
+FROM sys.master_files f
+INNER JOIN sys.databases d ON d.database_id = f.database_id
+GO
+
+
+SCRIPT TO MOVE DATA to another drive.
+
+Run SP_HELPDB[DBNames] to check the logicalNames
+
+	a. ALTER DATABASE DBNames
+MODIFY FILE (NAME = File1, FILENAME = 'C:\MSSQL\DATA\File1.mdf');
+
+
+	a. ALTER DATABASE DBNames SET OFFLINE;
+
+	a. Manually move files to new dest
+	
+	b. ALTER DATABASE DBName SET ONLINE;
+
+
+--In case we need to move both files at the same time.
+
+ALTER DATABASE DBNames
+MODIFY FILE (NAME = File1, FILENAME = 'C:\MSSQL\DATA\File1.mdf');
+
+ALTER DATABASE DBNames
+MODIFY FILE (NAME = File_log, FILENAME = 'F:\MSSQL\LOG\File1_Log.ldf');
+
+23. Check Logical NameDatabase
+
+SELECT d.name DatabaseName, f.name LogicalName,
+f.physical_name AS PhysicalName,
+f.type_desc TypeofFile
+FROM sys.master_files f
+INNER JOIN sys.databases d ON d.database_id = f.database_id
+GO
+
+ MIGRATION
+24. Get credential
+Copy the output and run to the target server( You need to replace MY PASSWORD by real Password)
+After credential created, you can now migrate proxy
+You can also migrate jobs
+
+SELECT 'CREATE CREDENTIAL '+[name]+' WITH IDENTITY='''+[credential_identity]+''',SECRET=''MY PASSWORD'''
+FROM [sys].[credentials]
+ORDER BY [name]
+
+LOGIN
+25. Create login with password
+CREATE LOGIN MyLogin WITH PASSWORD = '123';
+
+26. Create User for Login
+
+CREATE USER Guru99 for login MyLogin
+
+27. GRANT PERMISSION ON OBJECT
+USE DBNames
+GO
+Grant datareader on TableA to Guru99

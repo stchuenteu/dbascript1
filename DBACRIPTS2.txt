@@ -1,0 +1,4050 @@
+USE [master]
+GO
+
+/******1 Object:  StoredProcedure [dbo].[chk_num_connections]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+-------------------
+Create proc [dbo].[chk_num_connections]
+as
+begin 
+declare @cntconn int
+declare @maxconn int
+
+set nocount on 
+select @cntconn = count(*) from sysprocesses 
+select @maxconn = floor (threshold_value ) 
+from configuration
+where threshold_category = '#CONNECTIONS'
+
+if (@cntconn > @maxconn) begin
+print  'Error: ******** Num connection exceeded threshold ' + STR(@cntconn) + '*********'
+end
+end
+
+------------------- 
+
+GO
+
+
+
+/******2 Object:  StoredProcedure [dbo].[DBA_ALL_Reindex]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE procedure [dbo].[DBA_ALL_Reindex]
+As
+DECLARE @CurrentDB sysname
+DECLARE curDatabase CURSOR FAST_FORWARD FOR 
+SELECT name FROM master.sys.databases 
+WHERE name not in ('master','tempdb','msdb','model') and state_desc='ONLINE'
+OPEN curDatabase
+FETCH NEXT FROM curDatabase INTO @CurrentDB
+WHILE ( @@FETCH_STATUS = 0)
+BEGIN
+/********************************/
+--print @CurrentDB
+--
+declare @sql1 varchar(100)
+select @sql1 = 'USE ' + @CurrentDB + ';' + '
+
+'
+
+
+declare @sql2 varchar(max)
+select @sql2 = 
+-- Ensure a USE <databasename> statement has been executed first.
+'
+SELECT DB_NAME() AS DataBaseName;
+SET NOCOUNT ON;
+DECLARE @objectid int;
+DECLARE @indexid int;
+DECLARE @partitioncount bigint;
+DECLARE @schemaname nvarchar(130); 
+DECLARE @objectname nvarchar(130); 
+DECLARE @indexname nvarchar(130); 
+DECLARE @partitionnum bigint;
+DECLARE @partitions bigint;
+DECLARE @frag float;
+DECLARE @command nvarchar(4000); 
+-- Conditionally select tables and indexes from the sys.dm_db_index_physical_stats function 
+-- and convert object and index IDs to names.
+SELECT
+    object_id AS objectid,
+    index_id AS indexid,
+    partition_number AS partitionnum,
+    avg_fragmentation_in_percent AS frag
+INTO #work_to_do
+FROM sys.dm_db_index_physical_stats (DB_ID(), NULL, NULL , NULL, ''LIMITED'')
+WHERE avg_fragmentation_in_percent > 5.0 AND index_id > 0;
+
+-- Declare the cursor for the list of partitions to be processed.
+DECLARE partitions CURSOR FOR SELECT * FROM #work_to_do;
+
+-- Open the cursor.
+OPEN partitions;
+
+-- Loop through the partitions.
+WHILE (1=1)
+    BEGIN;
+        FETCH NEXT
+           FROM partitions
+           INTO @objectid, @indexid, @partitionnum, @frag;
+        IF @@FETCH_STATUS < 0 BREAK;
+        SELECT @objectname = QUOTENAME(o.name), @schemaname = QUOTENAME(s.name)
+        FROM sys.objects AS o
+        JOIN sys.schemas as s ON s.schema_id = o.schema_id
+        WHERE o.object_id = @objectid;
+        SELECT @indexname = QUOTENAME(name)
+        FROM sys.indexes
+        WHERE  object_id = @objectid AND index_id = @indexid;
+        SELECT @partitioncount = count (*)
+        FROM sys.partitions
+        WHERE object_id = @objectid AND index_id = @indexid;
+
+-- 30 is an arbitrary decision point at which to switch between reorganizing and rebuilding.
+        IF @frag between 5.0 and 30.0
+            SET @command = N''ALTER INDEX '' + @indexname + N'' ON '' + @schemaname + N''.'' + @objectname + N'' REORGANIZE'';
+        IF @frag >= 30.0
+            SET @command = N''ALTER INDEX '' + @indexname + N'' ON '' + @schemaname + N''.'' + @objectname + N'' REBUILD'';
+        IF @partitioncount > 1
+            SET @command = @command + N'' PARTITION='' + CAST(@partitionnum AS nvarchar(10));
+        EXEC (@command);
+        PRINT N''Executed: '' + @command;
+
+    END;
+
+-- Close and deallocate the cursor.
+CLOSE partitions;
+DEALLOCATE partitions;
+
+-- Drop the temporary table.
+--DROP TABLE #work_to_do;
+
+'
+declare @sql varchar(max)
+select @sql = @sql1 + @sql2
+
+EXEC sp_sqlexec @Sql
+
+--print @sql
+
+FETCH NEXT FROM curDatabase INTO @CurrentDB
+END -- curDatabase WHILE loop
+CLOSE curDatabase
+DEALLOCATE curDatabase
+GO
+
+/******3 Object:  StoredProcedure [dbo].[p_Enable_SQL_Jobs]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- =============================================
+-- Author:		Kishore Darga
+-- Create date: 10/02/2019
+-- Description:	Disable and Enable the jobs based on Primary Replica
+-- =============================================
+Create PROCEDURE [dbo].[p_Enable_SQL_Jobs] 
+	-- Add the parameters for the stored procedure here
+
+AS
+BEGIN
+SET NOCOUNT ON;
+
+	DECLARE @preferredReplica int
+
+	SET @preferredReplica = (SELECT [master].sys.fn_hadr_backup_is_preferred_replica('gsfs_dw'))
+		IF (@preferredReplica = 1)
+--print @preferredReplica
+BEGIN
+	-- SET NOCOUNT ON added to prevent extra result sets from
+	-- interfering with SELECT statements.
+
+				DECLARE @jobs nvarchar(130); 
+				DECLARE @command nvarchar(4000);
+
+			IF OBJECT_ID(N'tempdb..#enable') IS NOT NULL drop table #enable
+				SELECT 'EXEC msdb..sp_update_job @job_name = '''+NAME+''', @enabled = 1' as jobs
+				into #enable FROM msdb..sysjobs
+
+				-- Declare the cursor for the list of partitions to be processed.
+			DECLARE partitiones CURSOR FOR SELECT * FROM #enable
+				--Order by Indexsize Desc
+
+	-- Open the cursor.
+OPEN partitiones;
+
+				-- Loop through the partitions.
+					WHILE (1=1)
+					BEGIN;
+							FETCH NEXT FROM partitiones
+							   INTO @jobs;
+
+									 IF @@FETCH_STATUS < 0 BREAK;
+									   SET @command = @jobs ;
+
+						EXEC (@command);
+						PRINT N'Executed: ' + @command;
+					END;
+
+-- Close and deallocate the cursor.
+CLOSE partitiones;
+DEALLOCATE partitiones; 
+
+-- Disable the SQL jobs
+		exec msdb..sp_update_job @job_name = '02 Load Month End Billing', @enabled = 0
+		exec msdb..sp_update_job @job_name = '04 Load Reinsurance_NoProd', @enabled = 0
+		exec msdb..sp_update_job @job_name = '08 Add Views To SCS_Auto Qa', @enabled = 0
+		exec msdb..sp_update_job @job_name = '10 Pre Load Month End', @enabled = 0
+		exec msdb..sp_update_job @job_name = '14 Ar Commission Statement', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'AD HOC', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'ad_hoc_run', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'Backup_Databases_CopyOnly_For_DR', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'collection_set_1_noncached_collect_and_upload', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'collection_set_2_collection', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'collection_set_2_upload', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'collection_set_3_collection', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'collection_set_3_upload', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'CommandLog Cleanup', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'DatabaseIntegrityCheck - SYSTEM_DATABASES', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'DBA_DB_Failover_To_Houston', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'DBA-Maint_One-DB_Reindex', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'DBA-Rebuild.Indexes', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_Agent_Production_Reports', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_Dim_Maintenance_Nigthly', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_General', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_Load_Fact_Claim', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_Load_SCS_Form_Def_Delta_Stage_Report', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_Load_TriPacPPM', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_Misc_Two_Hour', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_MonthEnd_Delete_Previous_SCS_Backup', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_SP_Load_ServCo_Legacy', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_SSRS_Report_Subscript_CO870', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_SSRS_Report_Subscript_NSD_Agent_MtD_Prodution', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'jb_temp_Process', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'SSA_BlockingAlert', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'SSA_LongRunningJobsAlert', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'SSA_LongRunningQueriesAlert', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'SSA_PerfStats', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'SSIS Server Maintenance Job', @enabled = 0
+		exec msdb..sp_update_job @job_name = 'syspolicy_purge_history', @enabled = 0
+
+END
+
+--DECLARE @preferredReplica int
+			SET @preferredReplica = (SELECT [master].sys.fn_hadr_backup_is_preferred_replica('gsfs_dw'))
+			IF (@preferredReplica = 0)
+			--print @preferredReplica
+BEGIN
+
+			--DECLARE @jobs nvarchar(130); 
+			--DECLARE @command nvarchar(4000);
+
+			IF OBJECT_ID(N'tempdb..#Disable') IS NOT NULL drop table #Disable
+			SELECT 'EXEC msdb..sp_update_job @job_name = '''+NAME+''', @enabled = 0' as jobs
+			into #Disable FROM msdb..sysjobs
+
+			-- Declare the cursor for the list of partitions to be processed.
+			DECLARE partitiones CURSOR FOR SELECT * FROM #Disable
+			--Order by Indexsize Desc
+
+			-- Open the cursor.
+			OPEN partitiones;
+
+			-- Loop through the partitions.
+				WHILE (1=1)
+					BEGIN;
+							FETCH NEXT FROM partitiones
+							   INTO @jobs;
+
+									 IF @@FETCH_STATUS < 0 BREAK;
+									   SET @command = @jobs ;
+
+						EXEC (@command);
+						PRINT N'Executed: ' + @command;
+					 END;
+
+			-- Close and deallocate the cursor.
+			CLOSE partitiones;
+			DEALLOCATE partitiones; 
+--Enable The SQL jobs
+	EXEC msdb..sp_update_job @job_name = 'DBA-Backups.SystemDB_Full', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'DBA-Backups.UserDB_Diff', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'DBA-Backups.UserDB_Full', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'DBA-Backups.UserDB_Tran', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'DBA-Cycle_Errorlog', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'Generate_User_Entitlements', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'DBA-SQL_ErrorLog_Alerts', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'SSA_CPUAlert', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'SSA_HealthReport', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'SSA_MemoryUsageStats', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'SSIS Server Maintenance Job', @enabled = 1
+	EXEC msdb..sp_update_job @job_name = 'syspolicy_purge_history', @enabled = 1
+END
+
+END
+
+
+GO
+
+
+=======================================================================================================================================================================================================
+
+/******3 Object:  StoredProcedure [dbo].[SP_Collects_Fragmentation]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE Procedure [dbo].[SP_Collects_Fragmentation]
+As
+
+ /***************************************************************************************************
+ Object:  StoredProcedure [dbo].[sp_IndexCollection]    Script Date: 9/23/2015 3:55:29 PM 
+
+ Developed by		:		Kishore
+ This SP will collect the fragmentation values and inserver in to table master.DBO.tbl_FragmentedIndexes
+
+ Once run this SP need to run below two update queries
+
+  **************************************************************************************************/
+
+If exists (select * from master.sys.all_objects where name like 'tbl_FragmentedIndexes' ) 
+		drop table master.dbo.Tbl_FragmentedIndexes;
+	create table master.dbo.Tbl_FragmentedIndexes 
+(DatabaseName varchar(100),Objects_id int, TableName varchar(100),Index_id int,partition_number int, 
+indexName varchar(100),avg_fragmentation_percent float,IndexType varchar(100),IndexsizeKB int, Schemaname varchar(100), Action_Required varchar(100) default 'NA') 
+
+
+	insert into master.dbo.Tbl_FragmentedIndexes (DatabaseName,Objects_id,TableName,Index_id,partition_number, 
+	indexName,avg_fragmentation_percent,IndexType,IndexsizeKB,Schemaname) 
+
+		exec master.sys.sp_MSforeachdb ' USE [?]
+	IF ''?'' <> ''master'' AND ''?'' <> ''model'' AND ''?'' <> ''msdb'' AND ''?'' <> ''tempdb'' 
+	SELECT db_name() as DatabaseName, a.Object_id, OBJECT_NAME (a.object_id) as TableName,  
+	a.index_id, a.partition_number, b.name as IndexName, 
+	avg_fragmentation_in_percent, 
+	index_type_desc,
+	8 * SUM(i.used_pages) AS ''IndexsizeKB'',
+	s.name as Schemaname 
+	FROM sys.dm_db_index_physical_stats (db_id(), NULL, NULL, NULL, NULL) AS a 
+	JOIN sys.partitions AS p ON p.OBJECT_ID = a.OBJECT_ID AND p.index_id = a.index_id
+	JOIN sys.allocation_units AS i ON i.container_id = p.partition_id
+    JOIN sys.objects AS o on o.object_id = a.OBJECT_ID
+	JOIN sys.schemas as s ON s.schema_id = o.schema_id
+	JOIN sys.indexes AS b ON a.object_id = b.object_id AND a.index_id = b.index_id
+    WHERE b.index_id <> 0 and avg_fragmentation_in_percent <>0 
+	GROUP BY a.OBJECT_ID,a.index_id,a.partition_number,b.name,avg_fragmentation_in_percent, s.name,index_type_desc'
+
+
+--Once run above SP. need to run below two update queries
+
+	update master.dbo.tbl_FragmentedIndexes 
+	set Action_Required ='Rebuild' 
+	where avg_fragmentation_percent >30;  
+
+
+	update master.dbo.tbl_FragmentedIndexes 
+	set Action_Required ='Reorganize' 
+	where avg_fragmentation_percent between 5 and 30;
+
+	--Make it index as Re-org instead of Online rebuild indexes. It fail, due to index data type text, ntext, image or FILESTREAM 
+	update master.dbo.tbl_FragmentedIndexes 
+	set Action_Required ='Reorganize' 
+	where indexName in('PK_GSFS_IPS_StoredEvent','PK_GSFS_IPS_APGroup',
+	'PK_GSFS_IPS_JE_GL_EXPORT','PK_PresentationPublish','PK_GSFS_AP_Invoice','PK_DataStore','PK_Class',
+	'PK_GSFS_IPS_SCSContractDetail','PK_tblStatements','PK_GSFS_IPS_GACGroupActivityHistory','PK_CI_Report','PK_IOMap','PK_GSFS_IPS_PaymentInfoActivityHistory');
+
+	update master.dbo.tbl_FragmentedIndexes 
+	set Action_Required ='NA' 
+	where indexName in('idx_Clust_ContClmClmDtl');
+
+	Delete from [dbo].[Tbl_FragmentedIndexes] where DatabaseName LIKE 'scs_auto_qa%'
+
+
+  /*******************************************************/ 
+
+--select * from master.dbo.tbl_FragmentedIndexes
+
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_dba_extract_space_stats]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS OFF
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE procedure [dbo].[sp_dba_extract_space_stats] 
+As
+
+/*
+Description: Reports space utilization for all Databases on the current Dataserver.
+
+Modifications:
+05/24/2016  Bala Peri     Implementation
+*/
+
+Begin
+
+Set NoCount On
+
+Declare @DBName			VarChar(100),
+		@CursorSql		Varchar(1000),
+		@ExecSQL		Varchar(2000)
+
+
+	Select @CursorSql = 'Declare DBName Cursor For Select ''['' + RTrim(LTrim(Name)) + '']'' From Master.Dbo.Sysdatabases Where Status & 512 != 512 Order By Name;'
+	Exec (@CursorSql)
+
+	Open DBName
+	Fetch Next From DBName Into @DBName
+
+	While @@Fetch_Status = 0
+	Begin
+
+		--Exec Local SP to gather space stats		
+		Select @ExecSQL = ' Execute ' + @DBName + '.dbo.sp_dba_gather_space_stats;'
+		Exec (@ExecSQL)
+
+		Fetch Next From DBName Into @DBName
+	End
+
+	Close DBName
+	Deallocate DBName
+
+End
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_dba_gather_space_stats]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS OFF
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE procedure [dbo].[sp_dba_gather_space_stats] 
+as
+/*
+Description: Gathers the Space utilization information for the Database in context.
+
+Modifications:
+05/24/2016  Bala Peri     Implementation
+*/
+
+Begin
+
+Set NoCount On
+
+Declare @ServerName		VarChar(50),
+		@UserName		VarChar(50),
+		@DBName			VarChar(100),
+		@DbSql			Varchar(1000),
+		@TotalData		Numeric(15,3),
+		@UsedData		Numeric(15,3),
+		@TotalLog		Numeric(15,3),
+		@UsedLog		Numeric(15,3)
+
+create table #database_files
+(
+    file_id           int              NOT NULL,
+    type              int              NOT NULL,
+    [size]            int              NOT NULL,
+    name              sysname          NOT NULL
+);
+
+Select	@ServerName = RTrim(LTrim(@@servername)),
+		@DBName	= db_name(),
+		@UserName = RTrim(LTrim(suser_sname()));
+
+set @DbSql = 'insert into #database_files select file_id, type, [size], name from sys.database_files'
+exec (@DbSql)
+
+-- Populate the variables for the Data segment
+select @TotalData = isnull(sum(size/128.0),0.00),
+		@UsedData = isnull(sum((CAST(FILEPROPERTY(name,'SpaceUsed') AS int)/128.0)),0.00)
+FROM #database_files
+group by type
+having type = 0
+
+-- Populate the variables for the Log segment
+select	@TotalLog	= isnull(sum(size/128.0),0.00),
+		@UsedLog	= isnull(sum((CAST(FILEPROPERTY(name,'SpaceUsed') AS int)/128.0)),0.00)
+FROM #database_files
+group by type
+having type = 1
+
+Select	@ServerName, @DBName, @TotalData, @UsedData, @TotalLog,	@UsedLog, @UserName
+
+End
+GO
+
+
+
+
+/****** Object:  StoredProcedure [dbo].[sp_dba_generate_db_create_commands]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_generate_db_create_commands]
+AS
+
+/******************************************************************************************************************
+Stored Procedure Name	:	sp_dba_generate_db_create_commands
+
+Purpose					:	Script to Generate the DB Create Scripts. Used as a part of a complete D/R Strategy.
+
+Author					:	Bala Peri
+
+Date Created			:	03/31/2017
+******************************************************************************************************************/
+
+Begin
+
+	Set Nocount On;
+
+	create table #server_file_list 
+	(rowid int identity(1,1) not null,
+	f_dbid int null,
+	f_id int null,
+	f_type varchar(10) null,
+	g_name varchar(40) null, 
+	g_defaultdesc varchar(7) null, 
+	f_name varchar(60) null, 
+	f_path varchar(260) null, 
+	f_size varchar(10) null, 
+	f_maxsize varchar(15) null, 
+	f_growth varchar(15) null);
+
+	create table #db_listing 
+	(rowid int identity(1,1) not null,
+	f_dbid int null);
+
+	set nocount on;
+
+	EXEC sp_MSForeachdb 'USE [?] 
+	BEGIN
+
+		exec sp_dba_generate_db_create_commands_pre
+
+	END'
+
+	Declare @dbid int;
+	Declare @db_listing_row_min int; 
+	Declare @db_listing_row_max int;
+	Declare @db_data_file_list_row_min int;
+	Declare @db_data_file_list_row_max int;
+	Declare @db_log_file_list_row_min int;
+	Declare @db_log_file_list_row_max int;
+	Declare @Print_Var_1 Varchar(100);
+	Declare @Print_Var_2 Varchar(1000);
+	Declare @previous_fgroup_name varchar(40);
+	Declare @current_fgroup_name varchar(40);
+	Declare @default_desc char(7);
+
+	Insert Into #db_listing Select Distinct f_dbid from #server_file_list Order By f_dbid;
+
+	Select @db_listing_row_min = Min(rowid), @db_listing_row_max = Max(rowid) From #db_listing;
+
+	While (@db_listing_row_min < @db_listing_row_max +1)
+	Begin
+
+		Select @dbid = f_dbid From #db_listing Where rowid = @db_listing_row_min;
+
+		create table #db_data_file_list 
+		(rowid int identity(1,1) not null,
+		g_name varchar(40) null, 
+		g_defaultdesc varchar(7) null, 
+		f_name varchar(60) null, 
+		f_path varchar(260) null, 
+		f_size varchar(10) null, 
+		f_maxsize varchar(15) null, 
+		f_growth varchar(15) null);
+
+		create table #db_log_file_list 
+		(rowid int identity(1,1) not null,
+		f_name varchar(60) null, 
+		f_path varchar(260) null, 
+		f_size varchar(10) null, 
+		f_maxsize varchar(15) null, 
+		f_growth varchar(15) null);
+
+		Select @Print_Var_1 = '/* Begin :: Database Creation Scripts For ' + db_name(@dbid) + ' */'
+		Print @Print_Var_1;
+		Select @Print_Var_1 = '';
+		Print @Print_Var_1;
+
+		Select @Print_Var_1 = 'CREATE DATABASE [' + db_name(@dbid) + ']'
+		Print @Print_Var_1;
+		Select @Print_Var_1 = ' CONTAINMENT = ' + containment_desc from sys.databases where database_id = @dbid
+		Print @Print_Var_1;
+		Select @Print_Var_1 = ' ON PRIMARY'
+		Print @Print_Var_1;
+
+		Insert Into #db_data_file_list (g_name, g_defaultdesc, f_name, f_path, f_size, f_maxsize, f_growth)
+		Select g_name, g_defaultdesc, f_name, f_path, f_size, f_maxsize, f_growth From #server_file_list
+		Where f_dbid = @dbid And f_type = 'DATA' Order By f_id;
+
+		Select @db_data_file_list_row_min = Min(rowid), @db_data_file_list_row_max = Max(rowid) From #db_data_file_list;
+
+		Select @previous_fgroup_name = g_name From #db_data_file_list Where rowid = @db_data_file_list_row_min;
+
+		While (@db_data_file_list_row_min < @db_data_file_list_row_max +1)
+		Begin
+
+			Select @current_fgroup_name = g_name, @default_desc = IsNull(g_defaultdesc,'') From #db_data_file_list Where rowid = @db_data_file_list_row_min;
+
+			If (@previous_fgroup_name <> @current_fgroup_name)
+			Begin
+				Select	@Print_Var_1 = ' FILEGROUP ['+@current_fgroup_name+']'
+
+				If (@default_desc <> '')
+					Select	@Print_Var_1 = @Print_Var_1+ ' ' + @default_desc;
+
+				Print @Print_Var_1;
+			End;
+
+			Select	@Print_Var_2 = '( NAME = N'''+f_name+''', FILENAME = N'''+f_path+''', SIZE = '+f_size+', MAXSIZE = '+f_maxsize+', FILEGROWTH = '+f_growth+' )'
+			From	#db_data_file_list
+			Where	rowid = @db_data_file_list_row_min;
+
+			If (@db_data_file_list_row_min < @db_data_file_list_row_max)
+				Select	@Print_Var_2 = @Print_Var_2 +','
+
+			Print @Print_Var_2;
+
+			Select @db_data_file_list_row_min = @db_data_file_list_row_min +1;
+
+		End;
+
+		Insert Into #db_log_file_list (f_name, f_path, f_size, f_maxsize, f_growth)
+		Select f_name, f_path, f_size, f_maxsize, f_growth From #server_file_list
+		Where f_dbid = @dbid And f_type = 'LOG' Order By f_id;
+
+		Select @db_log_file_list_row_min = Min(rowid), @db_log_file_list_row_max = Max(rowid) From #db_log_file_list;
+
+		Select @Print_Var_1 = ' LOG ON';
+		Print @Print_Var_1;
+
+		While (@db_log_file_list_row_min < @db_log_file_list_row_max + 1)
+		Begin
+
+			--Select * From #db_log_file_list Where rowid = @db_log_file_list_row_min;
+
+			Select	@Print_Var_2 = '( NAME = N'''+f_name+''', FILENAME = N'''+f_path+''', SIZE = '+f_size+', MAXSIZE = '+f_maxsize+', FILEGROWTH = '+f_growth+')'
+			From	#db_log_file_list
+			Where	rowid = @db_log_file_list_row_min;
+
+			If (@db_log_file_list_row_min < @db_log_file_list_row_max)
+				Select	@Print_Var_2 = @Print_Var_2 +','
+
+			Print @Print_Var_2;
+
+			Select @db_log_file_list_row_min = @db_log_file_list_row_min + 1;
+
+		End;
+
+		Drop Table #db_data_file_list;
+		Drop Table #db_log_file_list;
+
+		Select @Print_Var_1 = 'GO'
+		Print @Print_Var_1;
+		Select @Print_Var_1 = ''
+		Print @Print_Var_1;
+		Select @Print_Var_1 = '/* End :: Database Creation Scripts For ' + db_name(@dbid) + ' */'
+		Print @Print_Var_1;
+
+		Select @Print_Var_2  = '/*===================================================================================================================================================================================*/'
+		Print @Print_Var_2;
+		Select @Print_Var_1 = '';
+		Print @Print_Var_1;
+
+		Select @db_listing_row_min = @db_listing_row_min +1;
+
+	End;
+
+drop table #server_file_list;
+drop table #db_listing;
+
+End
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_dba_generate_db_create_commands_batch]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_generate_db_create_commands_batch]
+AS
+
+/******************************************************************************************************************
+Stored Procedure Name	:	sp_dba_generate_db_create_commands_batch
+
+Purpose					:	Script to Generate the DB Create Scripts. Used as a part of a complete D/R Strategy.
+
+Author					:	Bala Peri
+
+Date Created			:	12/03/2018
+******************************************************************************************************************/
+
+Begin
+
+	Set Nocount On;
+
+	Delete [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage];
+
+	create table #server_file_list 
+	(rowid int identity(1,1) not null,
+	f_dbid int null,
+	f_id int null,
+	f_type varchar(10) null,
+	g_name varchar(40) null, 
+	g_defaultdesc varchar(7) null, 
+	f_name varchar(60) null, 
+	f_path varchar(260) null, 
+	f_size varchar(10) null, 
+	f_maxsize varchar(15) null, 
+	f_growth varchar(15) null);
+
+	create table #db_listing 
+	(rowid int identity(1,1) not null,
+	f_dbid int null);
+
+	set nocount on;
+
+	EXEC sp_MSForeachdb 'USE [?] 
+	BEGIN
+
+		exec sp_dba_generate_db_create_commands_pre
+
+	END'
+
+	Declare @dbid int;
+	Declare @db_listing_row_min int; 
+	Declare @db_listing_row_max int;
+	Declare @db_data_file_list_row_min int;
+	Declare @db_data_file_list_row_max int;
+	Declare @db_log_file_list_row_min int;
+	Declare @db_log_file_list_row_max int;
+	Declare @Print_Var_1 Varchar(100);
+	Declare @Print_Var_2 Varchar(1000);
+	Declare @previous_fgroup_name varchar(40);
+	Declare @current_fgroup_name varchar(40);
+	Declare @default_desc char(7);
+
+	Insert Into #db_listing Select Distinct f_dbid from #server_file_list Order By f_dbid;
+
+	Select @db_listing_row_min = Min(rowid), @db_listing_row_max = Max(rowid) From #db_listing;
+
+	While (@db_listing_row_min < @db_listing_row_max +1)
+	Begin
+
+		Select @dbid = f_dbid From #db_listing Where rowid = @db_listing_row_min;
+
+		create table #db_data_file_list 
+		(rowid int identity(1,1) not null,
+		g_name varchar(40) null, 
+		g_defaultdesc varchar(7) null, 
+		f_name varchar(60) null, 
+		f_path varchar(260) null, 
+		f_size varchar(10) null, 
+		f_maxsize varchar(15) null, 
+		f_growth varchar(15) null);
+
+		create table #db_log_file_list 
+		(rowid int identity(1,1) not null,
+		f_name varchar(60) null, 
+		f_path varchar(260) null, 
+		f_size varchar(10) null, 
+		f_maxsize varchar(15) null, 
+		f_growth varchar(15) null);
+
+		Select @Print_Var_1 = '/* Begin :: Database Creation Scripts For ' + db_name(@dbid) + ' */'
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = '';
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+
+		Select @Print_Var_1 = 'CREATE DATABASE [' + db_name(@dbid) + ']'
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = ' CONTAINMENT = ' + containment_desc from sys.databases where database_id = @dbid
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = ' ON PRIMARY'
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+
+		Insert Into #db_data_file_list (g_name, g_defaultdesc, f_name, f_path, f_size, f_maxsize, f_growth)
+		Select g_name, g_defaultdesc, f_name, f_path, f_size, f_maxsize, f_growth From #server_file_list
+		Where f_dbid = @dbid And f_type = 'DATA' Order By f_id;
+
+		Select @db_data_file_list_row_min = Min(rowid), @db_data_file_list_row_max = Max(rowid) From #db_data_file_list;
+
+		Select @previous_fgroup_name = g_name From #db_data_file_list Where rowid = @db_data_file_list_row_min;
+
+		While (@db_data_file_list_row_min < @db_data_file_list_row_max +1)
+		Begin
+
+			Select @current_fgroup_name = g_name, @default_desc = IsNull(g_defaultdesc,'') From #db_data_file_list Where rowid = @db_data_file_list_row_min;
+
+			If (@previous_fgroup_name <> @current_fgroup_name)
+			Begin
+				Select	@Print_Var_1 = ' FILEGROUP ['+@current_fgroup_name+']'
+
+				If (@default_desc <> '')
+					Select	@Print_Var_1 = @Print_Var_1+ ' ' + @default_desc;
+
+				Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+			End;
+
+			Select	@Print_Var_2 = '( NAME = N'''+f_name+''', FILENAME = N'''+f_path+''', SIZE = '+f_size+', MAXSIZE = '+f_maxsize+', FILEGROWTH = '+f_growth+' )'
+			From	#db_data_file_list
+			Where	rowid = @db_data_file_list_row_min;
+
+			If (@db_data_file_list_row_min < @db_data_file_list_row_max)
+				Select	@Print_Var_2 = @Print_Var_2 +','
+
+			Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_2);
+
+			Select @db_data_file_list_row_min = @db_data_file_list_row_min +1;
+
+		End;
+
+		Insert Into #db_log_file_list (f_name, f_path, f_size, f_maxsize, f_growth)
+		Select f_name, f_path, f_size, f_maxsize, f_growth From #server_file_list
+		Where f_dbid = @dbid And f_type = 'LOG' Order By f_id;
+
+		Select @db_log_file_list_row_min = Min(rowid), @db_log_file_list_row_max = Max(rowid) From #db_log_file_list;
+
+		Select @Print_Var_1 = ' LOG ON';
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+
+		While (@db_log_file_list_row_min < @db_log_file_list_row_max + 1)
+		Begin
+
+			--Select * From #db_log_file_list Where rowid = @db_log_file_list_row_min;
+
+			Select	@Print_Var_2 = '( NAME = N'''+f_name+''', FILENAME = N'''+f_path+''', SIZE = '+f_size+', MAXSIZE = '+f_maxsize+', FILEGROWTH = '+f_growth+')'
+			From	#db_log_file_list
+			Where	rowid = @db_log_file_list_row_min;
+
+			If (@db_log_file_list_row_min < @db_log_file_list_row_max)
+				Select	@Print_Var_2 = @Print_Var_2 +','
+
+			Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_2);
+
+			Select @db_log_file_list_row_min = @db_log_file_list_row_min + 1;
+
+		End;
+
+		Drop Table #db_data_file_list;
+		Drop Table #db_log_file_list;
+
+		Select @Print_Var_1 = 'GO'
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = ''
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = '/* End :: Database Creation Scripts For ' + db_name(@dbid) + ' */'
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+
+		Select @Print_Var_2  = '/*===================================================================================================================================================================================*/'
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_2);
+		Select @Print_Var_1 = '';
+		Insert Into [DBA_Repository].[dbo].[ServerDBCreateCommands_Stage] ([DBCreateCommand]) Values (@Print_Var_1);
+
+		Select @db_listing_row_min = @db_listing_row_min +1;
+
+	End;
+
+drop table #server_file_list;
+drop table #db_listing;
+
+End
+GO
+---=======================================================================================================================================================================================================
+/******7 Object:  StoredProcedure [dbo].[sp_dba_generate_restore_commands_batch]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_generate_restore_commands_batch]
+AS
+
+/********************************************************************************************************************
+Stored Procedure Name	:	sp_dba_generate_restore_commands_batch
+
+Purpose					:	Script to generate the DB recover scripts for all Database on any given SQL Server
+							The Script assumes that all the Backups are available for a Full Recovery.
+							Change the physical_device_name when restoring on a different server.
+
+Author					:	Bala Peri
+
+Date Created			:	12/03/2018
+********************************************************************************************************************/
+
+Set Nocount On;
+
+Declare @CurrRow Int;
+Declare @MaxRow Int;
+Declare @FileMinRow Int;
+Declare @FileMaxRow Int;
+Declare @File_Number Int;
+Declare @TranMinRow Int;
+Declare @TranMaxRow Int;
+Declare @backup_set_id Int;
+Declare @diff_backup_set_id Int;
+Declare @media_set_id Int;
+Declare @backup_db_name Varchar(60);
+Declare @backup_db_model Varchar(15);
+Declare @Print_Var_1 Varchar(750);
+Declare @Print_Var_2 Varchar(750);
+
+Create Table #db_list (RowID Int Identity(1,1), DBName Varchar(120) Null, DBRecoveryModel Varchar(15) Null);
+
+Create Table #move_file_list (RowID Int Identity(1,1), File_Number Int Null);
+
+Create Table #tran_log_list (RowID Int Identity(1,1), media_set_id Int Null);
+
+Delete [DBA_Repository].[dbo].[ServerRestoreCommands_Stage];
+
+Insert Into #db_list (DBName, DBRecoveryModel) Select Name, Recovery_Model_Desc from Sys.Databases Where Name != 'tempdb' Order By database_id;
+
+Select @CurrRow = Min(RowID), @MaxRow = Max(RowID) From #db_list;
+
+Select @Print_Var_1  = '/*================================================================================================================================*/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*************************************************************************************************************************************************************************************/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/**************************                    ' + @@servername + ' :: Begin Database Recovery Scripts Generation At :: ' + Convert(char,getdate()) + '                   **************************/';
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*************************************************************************************************************************************************************************************/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*================================================================================================================================*/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1 = '';
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1 = '';
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*================================================================================================================================*/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+While (@CurrRow < @MaxRow +1)
+Begin
+
+	select @backup_db_name = DBName, @backup_db_model = DBRecoveryModel From #db_list Where RowID = @CurrRow;
+	select @backup_set_id = max(backup_set_id) From msdb.dbo.backupset Where type = 'D' And backup_finish_date Is Not Null And database_name = @backup_db_name;
+
+	If (@backup_set_id Is Not Null)
+	Begin
+
+		Select @Print_Var_1 = '/* Begin :: Restore Scripts For ' + @backup_db_name + ' */'
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = '';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+		Select @Print_Var_1 = '--Restore Database From the most recent Full Backups';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values ( @Print_Var_1);
+
+		Select @Print_Var_2 = 'Restore Database ' + @backup_db_name + ' From Disk = ''' + physical_device_name + ''' With' From msdb.dbo.backupmediafamily Where media_set_id = 
+		(Select media_set_id From msdb.dbo.backupset Where backup_set_id = @backup_set_id);
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values ( @Print_Var_2);
+
+		Delete #move_file_list;
+
+		Insert Into #move_file_list (File_Number) Select File_Number From msdb.dbo.backupfile Where backup_set_id = @backup_set_id Order By File_Number;
+
+		Select @FileMinRow = Min(RowID), @FileMaxRow = Max(RowID) From #move_file_list;
+
+		While (@FileMinRow < @FileMaxRow +1)
+		Begin
+
+			Select @File_Number = File_Number From #move_file_list Where RowID = @FileMinRow;
+
+			Select @Print_Var_2 = 'MOVE ''' + logical_name + ''' TO ''' + physical_name + ''',' From msdb.dbo.backupfile Where backup_set_id = @backup_set_id And File_Number = @File_Number;
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_2);
+
+			Set @FileMinRow = @FileMinRow + 1;
+
+		End;
+
+		Select @Print_Var_1 = 'Replace, NoRecovery;';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = '';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+		select @diff_backup_set_id = max(backup_set_id) From msdb.dbo.backupset Where type = 'I' And database_name = @backup_db_name And backup_set_id > @backup_set_id;
+
+		If (IsNull(@diff_backup_set_id,0) > 0)
+		Begin
+
+			Select @Print_Var_1 = '--Restore Database From the most recent Differential Backups';
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+			Select @Print_Var_2 = 'Restore Database ' + @backup_db_name + ' From Disk = ''' + physical_device_name + ''' With NoRecovery;' From msdb.dbo.backupmediafamily Where media_set_id = 
+			(Select media_set_id From msdb.dbo.backupset Where backup_set_id = @diff_backup_set_id);
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_2);
+			Select @Print_Var_1 = '';
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+		End;
+
+		If (@backup_db_model != 'SIMPLE' And @backup_db_name != 'model')
+		Begin
+
+
+			Select @Print_Var_1 = '--Restore all Tran Backups taken after the Database Backup';
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+			Select @Print_Var_1 = '--For Point-In-Time Recovery, just remover the Tran Restore entries that are not necessary';
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+			Delete #tran_log_list;
+
+			Insert Into #tran_log_list (media_set_id) 
+			Select	media_set_id 
+			From	msdb.dbo.backupset 
+			Where	type				= 'L' 
+			And		backup_finish_date	Is Not Null 
+			And		database_name		= @backup_db_name 
+			And		backup_set_id		> IsNull(@diff_backup_set_id,@backup_set_id)
+			Order By media_set_id;
+
+			Select @TranMinRow = Min(RowID), @TranMaxRow = Max(RowID) From #tran_log_list;
+
+			While (@TranMinRow < @TranMaxRow +1)
+			Begin
+
+				Select @media_set_id = media_set_id From #tran_log_list Where RowID = @TranMinRow;
+
+				Select @Print_Var_2 = 'Restore Log ' + @backup_db_name + ' From Disk = ''' + physical_device_name + ''' With NoRecovery;' 
+				From msdb.dbo.backupmediafamily Where media_set_id = @media_set_id;
+				Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_2);
+
+				Set @TranMinRow = @TranMinRow + 1;
+
+			End;
+
+			Select @Print_Var_1 = '';
+			Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+		End;
+
+		Select @Print_Var_1 = '--Finally Recover the Database';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = 'Restore Database ' + @backup_db_name + ' With Recovery;';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+		Select @Print_Var_1 = '';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+		Select @Print_Var_1 = '/* End :: Restore Scripts For ' + @backup_db_name + ' */'
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+		Select @Print_Var_2  = '/*================================================================================================================================*/'
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_2);
+		Select @Print_Var_1 = '';
+		Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+	End;
+
+	Set @CurrRow = @CurrRow + 1;
+
+End
+
+Select @Print_Var_1 = '';
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1 = '';
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*================================================================================================================================*/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*************************************************************************************************************************************************************************************/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/***************************                    ' + @@servername + ' :: End Database Recovery Scripts Generation At :: ' + Convert(char,getdate()) + '                   ***************************/';
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*************************************************************************************************************************************************************************************/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+Select @Print_Var_1  = '/*================================================================================================================================*/'
+Insert Into [DBA_Repository].[dbo].[ServerRestoreCommands_Stage] ([RestoreCommand]) Values (@Print_Var_1);
+
+
+Drop Table #db_list;
+Drop Table #move_file_list;
+Drop Table #tran_log_list;
+
+GO
+---=================================================================================================================================================================================================================================================
+/******8 Object:  StoredProcedure [dbo].[sp_dba_get_db_backup_info]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_get_db_backup_info]
+AS
+
+/********************************************************************************************************************
+Stored Procedure Name	:	sp_dba_get_db_backup_info
+
+Purpose					:	Script to obtain the last successful backup Date for every Database on a given SQL Server.
+
+Author					:	Bala Peri
+
+Date Created			:	07/23/2018
+********************************************************************************************************************/
+
+Begin
+
+	Set Nocount On;
+
+	--Create a temporary table to store the intermediate results
+	create table #backup_hist
+	(row_id int identity(1,1),
+	server_name nvarchar(128) null,
+	database_name nvarchar(128) null,
+	recovery_model nvarchar(60) null,
+	last_full_backup_finish_date	datetime null,
+	last_diff_backup_finish_date	datetime null,
+	last_tran_backup_finish_date	datetime null
+	);
+
+	insert into #backup_hist (server_name, database_name, recovery_model)
+	select @@servername, name, recovery_model_desc
+	from sys.databases
+	where name <> 'tempdb' 
+	and state_desc = 'ONLINE' 
+	and name in
+	(	select database_name
+		from sys.dm_hadr_availability_replica_states ars, sys.dm_hadr_database_replica_cluster_states drcs
+		where ars.replica_id = drcs.replica_id
+		And is_local = 1
+		And role = 1
+		Union
+		select name 
+		from sysdatabases 
+		where name not in (select database_name from sys.dm_hadr_database_replica_cluster_states)
+	)
+	order by name;
+
+	--Get Full Backup History
+	Select database_name, max(backup_set_id) as backup_set_id
+	Into #full
+	From msdb.dbo.backupset
+	Where type = 'D'
+	And backup_finish_date Is Not Null 
+	and is_copy_only = 0 
+	Group By database_name;
+
+	Update h
+	Set h.last_full_backup_finish_date = b.backup_finish_date
+	From #backup_hist h, #full f, msdb.dbo.backupset b 
+	Where b.database_name = f.database_name
+	and f.backup_set_id = b.backup_set_id
+	And b.database_name = h.database_name
+	And f.database_name = h.database_name;
+
+	--Get Diff Backup History
+	Select database_name, max(backup_set_id) as backup_set_id
+	Into #diff
+	From msdb.dbo.backupset d
+	Where type = 'I' 
+	And backup_finish_date Is Not Null 
+	and is_copy_only = 0 
+	And Exists (Select 1 From #full f Where d.database_name = f.database_name and d.backup_set_id > f.backup_set_id)
+	Group By database_name;
+
+	Update h
+	Set h.last_diff_backup_finish_date = b.backup_finish_date
+	From #backup_hist h, #diff d, msdb.dbo.backupset b 
+	Where b.database_name = d.database_name
+	and d.backup_set_id = b.backup_set_id
+	And b.database_name = h.database_name
+	And d.database_name = h.database_name;
+
+	--Get Tran Backup History
+	Select database_name, max(backup_set_id) as backup_set_id
+	Into #tran
+	From msdb.dbo.backupset d
+	Where type = 'L' 
+	And backup_finish_date Is Not Null 
+	and is_copy_only = 0 
+	And Exists (Select 1 From #full f Where d.database_name = f.database_name and d.backup_set_id > f.backup_set_id)
+	Group By database_name;
+
+	Update h
+	Set h.last_tran_backup_finish_date = b.backup_finish_date
+	From #backup_hist h, #tran t, msdb.dbo.backupset b 
+	Where b.database_name = t.database_name
+	and t.backup_set_id = b.backup_set_id
+	And b.database_name = h.database_name
+	And t.database_name = h.database_name;
+
+	--Report the backup information
+	select server_name, database_name, recovery_model, last_full_backup_finish_date, last_diff_backup_finish_date, last_tran_backup_finish_date
+	from #backup_hist
+	order by row_id;
+
+	--Clean up
+	drop table #tran;
+	drop table #diff;
+	drop table #full;
+	drop table #backup_hist;
+
+End
+GO
+-----======================================================================================================================================================================================================
+/******9 Object:  StoredProcedure [dbo].[sp_dba_get_diskspace_info]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+CREATE PROCEDURE [dbo].[sp_dba_get_diskspace_info]
+AS
+SET NOCOUNT ON
+
+DECLARE @hr int
+DECLARE @fso int
+DECLARE @drive char(1)
+DECLARE @odrive int
+DECLARE @TotalSize varchar(20)
+DECLARE @MB bigint ; SET @MB = 1048576
+
+CREATE TABLE #drives (drive char(1) PRIMARY KEY,
+FreeSpace int NULL,
+TotalSize int NULL)
+
+INSERT #drives(drive,FreeSpace)
+EXEC master.dbo.xp_fixeddrives
+
+EXEC @hr=sp_OACreate 'Scripting.FileSystemObject',@fso OUT
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @fso
+
+DECLARE dcur CURSOR LOCAL FAST_FORWARD
+FOR SELECT drive from #drives
+ORDER by drive
+
+OPEN dcur
+
+FETCH NEXT FROM dcur INTO @drive
+
+WHILE @@FETCH_STATUS=0
+BEGIN
+
+EXEC @hr = sp_OAMethod @fso,'GetDrive', @odrive OUT, @drive
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @fso
+
+EXEC @hr = sp_OAGetProperty @odrive,'TotalSize', @TotalSize OUT
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @odrive
+
+UPDATE #drives
+SET TotalSize=@TotalSize/@MB
+WHERE drive=@drive
+
+FETCH NEXT FROM dcur INTO @drive
+
+END
+
+CLOSE dcur
+DEALLOCATE dcur
+
+EXEC @hr=sp_OADestroy @fso
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @fso
+
+SELECT @@servername, drive, TotalSize as 'Total(MB)', FreeSpace as 'Free(MB)', CAST((FreeSpace/(TotalSize*1.0))*100.0 as int) as 'Free(%)'
+FROM #drives
+ORDER BY drive
+
+DROP TABLE #drives
+
+RETURN
+
+GO
+---===============================================================================================================================================================================================================
+/******10 Object:  StoredProcedure [dbo].[sp_dba_get_failed_job_executions]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_get_failed_job_executions]
+AS
+
+/********************************************************************************************************************
+Stored Procedure Name	:	sp_dba_get_failed_job_executions
+
+Purpose			:	Script to obtain the list of the last failed executions of the DBA maintenance jobs
+
+Author			:	Bala Peri
+
+Date Created		:	09/25/2018
+********************************************************************************************************************/
+
+Begin
+
+	Set Nocount On;
+
+	select @@servername server_name, j.name job_name, run_date_time =
+	substring(convert(varchar, h.run_date),1,4)+'-'+
+	substring(convert(varchar, h.run_date),5,2)+'-'+
+	substring(convert(varchar, h.run_date),7,2)+' '+
+	case when len(run_time) = 4 then '00' when len(run_time) = 5 then '0'+Left(run_time,1) Else Left(run_time,2) end + ':' + Left(Right(run_time,4),2) + ':' + Right(run_time,2),
+	next_run_date_time = substring(convert(varchar, s.next_run_date),1,4)+'-'+
+	substring(convert(varchar, s.next_run_date),5,2)+'-'+
+	substring(convert(varchar, s.next_run_date),7,2)+' '+
+	case when len(s.next_run_time) = 4 then '00' when len(s.next_run_time) = 5 then '0'+Left(s.next_run_time,1) Else Left(s.next_run_time,2) end + ':' + Left(Right(s.next_run_time,4),2) + ':' + Right(s.next_run_time,2)
+	from msdb..sysjobhistory h, msdb..sysjobs j, msdb..sysjobschedules s, (select max(instance_id) instance_id, job_id from msdb..sysjobhistory group by job_id) as l
+	where j.name like 'DBA%'
+	and j.job_id = h.job_id
+	and j.job_id = l.job_id
+	and l.job_id = h.job_id
+	and h.instance_id = l.instance_id
+	and j.enabled = 1
+	and h.run_status = 0
+	and j.job_id = s.job_id
+	order by h.instance_id;
+
+End
+
+GO
+-------==============================================================================================================================================================================================
+/******11 Object:  StoredProcedure [dbo].[sp_dba_get_job_execution_status]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_get_job_execution_status]
+AS
+
+/********************************************************************************************************************
+Stored Procedure Name	:	sp_dba_get_failed_job_executions
+
+Purpose			:	Script to obtain the execution status of all the DBA maintenance jobs for BI reporting
+
+Author			:	Bala Peri
+
+Date Created		:	01/16/2021
+********************************************************************************************************************/
+
+Begin
+
+	Set Nocount On;
+
+	select @@servername server_name, j.name job_name, 
+	job_status = case h.run_status when 0 then 'Failed' when 1 then 'Success' when 2 then 'Retry' when 3 then 'Canceled' when 4 then 'In Progress' end,
+	run_date_time =
+	substring(convert(varchar, h.run_date),1,4)+'-'+
+	substring(convert(varchar, h.run_date),5,2)+'-'+
+	substring(convert(varchar, h.run_date),7,2)+' '+
+	case when len(run_time) = 4 then '00' when len(run_time) = 5 then '0'+Left(run_time,1) Else Left(run_time,2) end + ':' + Left(Right(run_time,4),2) + ':' + Right(run_time,2),
+	next_run_date_time = substring(convert(varchar, s.next_run_date),1,4)+'-'+
+	substring(convert(varchar, s.next_run_date),5,2)+'-'+
+	substring(convert(varchar, s.next_run_date),7,2)+' '+
+	case when len(s.next_run_time) = 4 then '00' when len(s.next_run_time) = 5 then '0'+Left(s.next_run_time,1) Else Left(s.next_run_time,2) end + ':' + Left(Right(s.next_run_time,4),2) + ':' + Right(s.next_run_time,2)
+	from msdb..sysjobhistory h, msdb..sysjobs j, msdb..sysjobschedules s, (select max(instance_id) instance_id, job_id from msdb..sysjobhistory group by job_id) as l
+	where j.name like 'DBA%'
+	and j.job_id = h.job_id
+	and j.job_id = l.job_id
+	and l.job_id = h.job_id
+	and h.instance_id = l.instance_id
+	and j.enabled = 1
+	and j.job_id = s.job_id
+	order by h.instance_id;
+
+End
+GO
+
+------=============================================================================================================================================================================================================
+
+/******12 Object:  StoredProcedure [dbo].[sp_dba_get_last_gen_backup_space]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[sp_dba_get_last_gen_backup_space]
+AS
+Begin
+
+SET NOCOUNT ON
+
+Select @@servername, database_name, sum(backup_size)/1073741824 'Backup Size (GB)', sum(compressed_backup_size)/1073741824 'Compressed Backup Size (GB)',
+sum(backup_size)/1048576 'Backup Size (MB)', sum(compressed_backup_size)/1048576 'Compressed Backup Size (MB)', Convert(Numeric(5,2),(sum(backup_size)/1048576)/(sum(compressed_backup_size)/1048576),2) 'Compression Ratio'
+From msdb..backupset a
+Where database_name In (Select Name From sys.databases Where state_desc = 'ONLINE')
+And backup_set_id >= (select max(backup_set_id) from msdb..backupset b where a.database_name = b.database_name and b.type = 'D')
+Group by database_name
+order by database_name
+End
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_dba_get_volume_info]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS OFF
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
+
+
+CREATE procedure [dbo].[sp_dba_get_volume_info] (@SpaceMetric char(1) = 'G') 
+as
+/*
+Description: Reports the information on Fixed Drives that are of interest to the SQL Server Instance.
+
+Modifications:
+05/24/2016  Bala Peri     Implementation
+*/
+
+Begin
+
+	Set NoCount On
+
+	Declare @DbSql1			Varchar(200),
+			@DbSql2			Varchar(200),
+			@DbSql3			Varchar(200),
+			@Factor			Int
+
+	Select	@DbSql1 = 'Select Distinct Convert(Varchar(40),@@servername) ServerName,	Upper(SubString(Volume_Mount_Point, 1, 1)) AS Volume_Mount_Point, ',
+			@DbSql3	= ' From sys.master_files As f Cross Apply sys.dm_os_volume_stats(f.database_id, f.file_id) Order By 2';
+
+	Select @DbSql2 = Case @SpaceMetric
+
+		When 'K' Then  'convert(decimal(15,2),convert(decimal(15,2),total_bytes)/(1024)) AS Total_KB, convert(decimal(15,2),convert(decimal(15,2),available_bytes)/(1024)) AS Available_KB'
+
+		When 'M' Then	'convert(decimal(15,2),convert(decimal(15,2),total_bytes)/(1024*1024)) AS Total_MB, convert(decimal(15,2),convert(decimal(15,2),available_bytes)/(1024*1024)) AS Available_MB'
+
+		When 'G' Then	'convert(decimal(15,2),convert(decimal(15,2),total_bytes)/(1024*1024*1024)) AS Total_GB, convert(decimal(15,2),convert(decimal(15,2),available_bytes)/(1024*1024*1024)) AS Available_GB'
+
+	End
+
+	Exec (@DbSql1 + @DbSql2 + @DbSql3);
+
+End
+GO
+----=================================================================================================================================================================================================================
+/******13 Object:  StoredProcedure [dbo].[sp_dba_scan_errorlogs]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE  [dbo].[sp_dba_scan_errorlogs] (@LogNumber int = 0, @runlocal int = 0, @NumberOfMinutes int = 5)
+AS
+
+/*
+Description: Scans the SQL Server errorlogs for errors and alerts the DBA team.
+
+Modifications:
+05/28/2016  Bala Peri     Implementation
+
+*/
+Begin
+declare @count  smallint,
+        @SQL    varchar(1000),
+        @output varchar(255),
+		@runtime datetime,
+		@sqlversion varchar(10)
+
+set @count  = 0;
+set @SQL    = '';
+set @output = '';
+set @sqlversion = rtrim(ltrim(substring(@@version, 22, 5)));
+set @runtime = getdate();
+
+if @runlocal = 1
+	set @runtime = getdate()-100;
+
+
+if object_id('tempdb..#errors') is not null
+begin
+   drop table #errors;
+end
+
+CREATE TABLE #errors
+(
+	RowID int IDENTITY PRIMARY KEY,
+	EntryTime datetime,
+	source varchar(50),
+	LogEntry varchar(4000)
+);
+
+select @SQL = 'exec master..xp_readerrorlog ' + convert(varchar(3),@lognumber);
+
+insert into #errors (entrytime, source, logentry)
+execute (@SQL);
+
+delete #errors 
+where (logentry not like '%err%'
+		AND logentry not like '%warn%'
+		AND logentry not like '%kill%'
+		AND logentry not like '%dead%'
+		AND logentry not like '%cannot%'
+		AND logentry not like '%could%'
+		AND logentry NOT like '%fail%'
+		AND logentry not like '%not%'
+		AND logentry not like '%stop%'
+		AND logentry not like '%terminate%'
+		AND logentry not like '%bypass%'
+		AND logentry not like '%roll%'
+		AND logentry not like '%Database Id = 154%'
+		AND logentry not like '%truncate%'
+		AND logentry not like '%Database Id = 5%'
+		AND logentry not like '%upgrade%'
+		AND logentry not like '%victim%'
+		AND logentry not like '%recover%'
+		AND logentry not like '%IO requests taking longer than%')
+		OR logentry like '%errorlog%'
+		OR logentry like '%dbcc%' 
+		OR logentry like '%TRUNCATE_ONLY%'
+		OR logentry like '%Log was backed up%'
+		OR logentry like '%SSPI handshake%'
+		OR logentry like '%18456%' 
+		OR logentry like '%18452%'  -- Login failed
+		OR logentry like '%17806%' -- SSPI handshake
+		OR logentry like '%17049%' --cycle error log
+		OR logentry like '%error log has been reinitialized%'
+		OR logentry like '%Attempting to cycle error log%'  
+		OR logentry like '%Changing the status to MERGE%'
+		OR logentry like '%Deleting unrecoverable checkpoint table row%'
+		OR logentry like '%AlwaysOn Availability%'
+		OR logentry like '%Login failed%';
+
+DELETE #Errors WHERE EntryTime IS NULL OR EntryTime <  dateadd(mi, (-1*@NumberOfMinutes), @runtime);
+
+IF @RunLocal = 1
+BEGIN
+	SELECT *
+	FROM #errors
+END
+ELSE 
+BEGIN
+
+	CREATE TABLE #Exceptions
+	(
+		RowID int identity Primary Key,
+		LogEntry varchar(4000),
+		EntryCount int,
+		LastOccurence datetime
+	)
+
+
+	INSERT INTO #Exceptions (LogEntry, EntryCount, LastOccurence)
+	SELECT LogEntry, count(*), max(EntryTime)
+	FROM #Errors
+	GROUP BY LogEntry
+
+		DECLARE @Loop2 int
+		DECLARE @Subject varchar(100)
+		DECLARE @strMsg varchar(4000)
+
+		SELECT @Subject = 'SQL Monitor Alert: ' + @@servername
+
+		SELECT @Loop2 = min(RowID)
+		FROM #Exceptions
+
+		WHILE @Loop2 IS NOT NULL
+		BEGIN
+
+			SELECT 	@strMsg =  convert(char(15),'LogEntry:') + isnull(LogEntry, 'Unknown') + char(10) +
+					convert(char(15),'EventTime:') + convert(varchar, LastOccurence) + char(10) +
+					convert(char(15),'') + char(10) +
+					convert(char(15),'') + 'This error has occured '+convert(varchar, EntryCount)+' times.'
+			FROM #Exceptions
+			WHERE RowID = @Loop2
+
+			EXECUTE msdb.dbo.sp_send_dbmail @Recipients = 'SQLADMINS@friedkin.com', @Subject = @Subject, @Body = @strMsg
+
+			SELECT @Loop2 = min(RowID)
+			FROM #Exceptions
+			WHERE RowID > @Loop2
+
+		END
+
+END
+
+DROP TABLE #Exceptions
+DROP TABLE #Errors
+
+END
+GO
+
+---=======================================================================================================================================================================================================
+
+
+
+/******14 Object:  StoredProcedure [dbo].[sp_diskspace]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+/*CREATE  TABLE tblDiskdrives (
+ServerName varchar(500), 
+DriveName varchar(5),
+FreeSpaceMB int NULL,
+TotalSizeMB int NULL,
+FreePercent int NULL,
+Date_Captured Datetime NULL)
+
+SELECT * FROM tblDiskDrives
+*/
+CREATE PROCEDURE [dbo].[sp_diskspace]
+AS
+SET NOCOUNT ON
+DECLARE @hr int
+DECLARE @fso int
+DECLARE @drive char(1)
+DECLARE @odrive int
+DECLARE @TotalSize varchar(20)
+DECLARE @MB bigint ; SET @MB = 1048576
+CREATE TABLE #drives (drive char(1) PRIMARY KEY,
+ServerName varchar(500), 
+FreeSpace int NULL,
+TotalSize int NULL,
+Date_Captured Datetime NULL)
+INSERT #drives(drive,FreeSpace)
+EXEC master.dbo.xp_fixeddrives
+EXEC @hr=sp_OACreate 'Scripting.FileSystemObject',@fso OUT
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @fso
+DECLARE dcur CURSOR LOCAL FAST_FORWARD
+FOR SELECT drive from #drives
+ORDER by drive
+OPEN dcur
+FETCH NEXT FROM dcur INTO @drive
+WHILE @@FETCH_STATUS=0
+BEGIN
+EXEC @hr = sp_OAMethod @fso,'GetDrive', @odrive OUT, @drive
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @fso
+EXEC @hr = sp_OAGetProperty @odrive,'TotalSize', @TotalSize OUT
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @odrive
+UPDATE #drives
+SET ServerName = CAST(SERVERPROPERTY('MachineName') AS VARCHAR), TotalSize=(@TotalSize/@MB), Date_Captured = getdate()
+WHERE drive=@drive
+FETCH NEXT FROM dcur INTO @drive
+END
+CLOSE dcur
+DEALLOCATE dcur
+EXEC @hr=sp_OADestroy @fso
+IF @hr <> 0 EXEC sp_OAGetErrorInfo @fso
+Insert INTO tblDiskdrives
+(
+ServerName,
+DriveName,
+FreeSpaceMB,
+TotalSizeMB,
+FreePercent,
+Date_Captured
+)
+SELECT ServerName, drive,
+FreeSpace as 'Free(MB)',
+TotalSize as 'Total(MB)',
+CAST((FreeSpace/(TotalSize*1.0))*100.0 as int) as 'Free(%)',
+Date_Captured
+FROM #drives
+ORDER BY drive
+DROP TABLE #drives
+RETURN
+GO
+
+--===================================================================================================================================================================================================
+/****** Object:  StoredProcedure [dbo].[SP_Index_ReBuild]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE Procedure [dbo].[SP_Index_ReBuild] 
+--(@db nvarchar(100))
+as
+
+ /***************************************************************************************************
+ Object:  StoredProcedure [dbo].[SP_Index_ReBuild]    Script Date: 9/23/2015 3:55:29 PM 
+
+ Developed by		:		Kishore
+ This SP will run ReBuild based on Index size (KB) for all Databaess with reference table DBA_Rep.DBO.tbl_FragmentedIndexes
+
+  **************************************************************************************************/
+SET NOCOUNT ON;
+DECLARE @objectid int;
+DECLARE @dbname nvarchar(130);
+DECLARE @indexid int;
+DECLARE @partitioncount bigint;
+DECLARE @schemaname nvarchar(130); 
+DECLARE @objectname nvarchar(130); 
+DECLARE @indexname nvarchar(130); 
+DECLARE @partitionnum bigint;
+DECLARE @partitiones bigint;
+DECLARE @frag float;
+DECLARE @command nvarchar(4000);
+DECLARE @IndexSize int; 
+DECLARE @Action nvarchar(1000); 
+
+-- Conditionally select tables and indexes from the sys.dm_db_index_physical_stats function 
+-- and convert object and index IDs to names.
+
+SELECT
+	DatabaseName As dbname,
+    objects_id AS objectid,
+	Tablename as objectname,
+    index_id AS indexid,
+    partition_number AS partitionnum,
+	Indexname,
+    avg_fragmentation_percent AS frag,
+	Action_Required as actin,
+	IndexSizeKB as IndexSize,
+	schemaname
+INTO ##work_to_do
+FROM master.dbo.tbl_FragmentedIndexes
+where-- databasename=@db and 
+Action_Required='REBUILD'
+Order by IndexsizeKB Desc
+
+-- Declare the cursor for the list of partitions to be processed.
+DECLARE partitiones CURSOR FOR SELECT * FROM ##work_to_do
+Order by Indexsize Desc
+
+-- Open the cursor.
+OPEN partitiones;
+
+-- Loop through the partitions.
+	WHILE (1=1)
+		BEGIN;
+			FETCH NEXT FROM partitiones
+			   INTO @dbname, @objectid, @objectname,@indexid, @partitionnum,@indexname, @frag, @action,@IndexSize,@schemaname;
+
+					 IF @@FETCH_STATUS < 0 BREAK;
+
+-- 30 is an arbitrary decision point at which to switch between reorganizing and rebuilding.
+        IF @frag > 30.0
+            SET @command = N'ALTER INDEX ' + QUOTENAME (@indexname) + N' ON ' + QUOTENAME (@dbname) + N'.' + QUOTENAME (@schemaname) + N'.' + QUOTENAME (@objectname) + N' REBUILD WITH (ONLINE = ON) ';
+
+     /*   IF @partitioncount > 1
+            SET @command = @command + N' PARTITION=' + CAST(@partitionnum AS nvarchar(10));*/
+        EXEC (@command);
+        PRINT N'Executed: ' + @command;
+    END;
+
+-- Close and deallocate the cursor.
+CLOSE partitiones;
+DEALLOCATE partitiones; 
+
+-- Drop the temporary table.
+DROP TABLE ##work_to_do;
+
+--exec [SP_Index_ReBuild]
+GO
+
+---===========================================================================================================================================================================================================
+
+/******16 Object:  StoredProcedure [dbo].[SP_Index_ReOrg]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE Procedure [dbo].[SP_Index_ReOrg] 
+--(@db nvarchar(100))
+as
+
+ /***************************************************************************************************
+ Object:  StoredProcedure [dbo].[SP_Index_ReOrg]    Script Date: 9/23/2015 3:55:29 PM 
+
+ Developed by		:		Kishore
+ This SP will run Reorganize based on Index size (KB) for all Databaess with reference table DBA_Rep.DBO.tbl_FragmentedIndexes
+
+  **************************************************************************************************/
+ SET NOCOUNT ON;
+DECLARE @objectid int;
+DECLARE @dbname nvarchar(130);
+DECLARE @indexid int;
+DECLARE @partitioncount bigint;
+DECLARE @schemaname nvarchar(130); 
+DECLARE @objectname nvarchar(130); 
+DECLARE @indexname nvarchar(130); 
+DECLARE @partitionnum bigint;
+DECLARE @partitiones bigint;
+DECLARE @frag float;
+DECLARE @command nvarchar(4000);
+DECLARE @IndexSize int; 
+DECLARE @Action nvarchar(1000); 
+
+-- Conditionally select tables and indexes from the sys.dm_db_index_physical_stats function 
+-- and convert object and index IDs to names.
+
+SELECT
+	DatabaseName As dbname,
+    objects_id AS objectid,
+	Tablename as objectname,
+    index_id AS indexid,
+    partition_number AS partitionnum,
+	Indexname,
+    avg_fragmentation_percent AS frag,
+	Action_Required as actin,
+	IndexSizeKB as IndexSize,
+	schemaname
+INTO ##work_2_do
+FROM master.dbo.tbl_FragmentedIndexes
+where --databasename=@db and 
+Action_Required='REORGANIZE'
+Order by IndexsizeKB Desc
+
+-- Declare the cursor for the list of partitions to be processed.
+DECLARE partitiones CURSOR FOR SELECT * FROM ##work_2_do
+Order by Indexsize Desc
+
+-- Open the cursor.
+OPEN partitiones;
+
+-- Loop through the partitions.
+	WHILE (1=1)
+		BEGIN;
+			FETCH NEXT FROM partitiones
+			   INTO @dbname, @objectid, @objectname,@indexid, @partitionnum,@indexname, @frag, @action,@IndexSize,@schemaname;
+
+					 IF @@FETCH_STATUS < 0 BREAK;
+
+-- 30 is an arbitrary decision point at which to switch between reorganizing and rebuilding.
+        IF @frag <= 30.0
+            SET @command = N'ALTER INDEX ' + QUOTENAME (@indexname) + N' ON ' + QUOTENAME (@dbname) + N'.' + QUOTENAME (@schemaname) + N'.' + QUOTENAME (@objectname) + N' REORGANIZE ';
+
+     /*   IF @partitioncount > 1
+            SET @command = @command + N' PARTITION=' + CAST(@partitionnum AS nvarchar(10));*/
+        EXEC (@command);
+        PRINT N'Executed: ' + @command;
+    END;
+
+-- Close and deallocate the cursor.
+CLOSE partitiones;
+DEALLOCATE partitiones; 
+
+-- Drop the temporary table.
+DROP TABLE ##work_2_do;
+GO
+
+---=========================================================================================================================================================================================================
+
+
+/******17 Object:  StoredProcedure [dbo].[SP_Index_ReOrg_New]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE Procedure [dbo].[SP_Index_ReOrg_New] 
+(@db nvarchar(100))
+as
+
+ /***************************************************************************************************
+ Object:  StoredProcedure [dbo].[SP_Index_ReOrg]    Script Date: 9/23/2015 3:55:29 PM 
+
+ Developed by		:		Kishore
+ This SP will run Reorganize based on Index size (KB) for all Databaess with reference table DBA_Rep.DBO.tbl_FragmentedIndexes
+
+  **************************************************************************************************/
+ SET NOCOUNT ON;
+DECLARE @objectid int;
+DECLARE @dbname nvarchar(130);
+DECLARE @indexid int;
+DECLARE @partitioncount bigint;
+DECLARE @schemaname nvarchar(130); 
+DECLARE @objectname nvarchar(130); 
+DECLARE @indexname nvarchar(130); 
+DECLARE @partitionnum bigint;
+DECLARE @partitiones bigint;
+DECLARE @frag float;
+DECLARE @command nvarchar(4000);
+DECLARE @IndexSize int; 
+DECLARE @Action nvarchar(1000); 
+
+-- Conditionally select tables and indexes from the sys.dm_db_index_physical_stats function 
+-- and convert object and index IDs to names.
+
+SELECT
+	DatabaseName As dbname,
+    objects_id AS objectid,
+	Tablename as objectname,
+    index_id AS indexid,
+    partition_number AS partitionnum,
+	Indexname,
+    avg_fragmentation_percent AS frag,
+	Action_Required as actin,
+	IndexSizeKB as IndexSize,
+	schemaname
+INTO ##work_to_d
+FROM master.dbo.tbl_FragmentedIndexes
+where databasename=@db and 
+Action_Required='REORGANIZE'
+Order by IndexsizeKB Desc
+
+-- Declare the cursor for the list of partitions to be processed.
+DECLARE partitiones CURSOR FOR SELECT * FROM ##work_to_d
+Order by Indexsize Desc
+
+-- Open the cursor.
+OPEN partitiones;
+
+-- Loop through the partitions.
+	WHILE (1=1)
+		BEGIN;
+			FETCH NEXT FROM partitiones
+			   INTO @dbname, @objectid, @objectname,@indexid, @partitionnum,@indexname, @frag, @action,@IndexSize,@schemaname;
+
+					 IF @@FETCH_STATUS < 0 BREAK;
+
+-- 30 is an arbitrary decision point at which to switch between reorganizing and rebuilding.
+        IF @frag <= 30.0
+            SET @command = N'ALTER INDEX ' + QUOTENAME (@indexname) + N' ON ' + QUOTENAME (@dbname) + N'.' + QUOTENAME (@schemaname) + N'.' + QUOTENAME (@objectname) + N' REORGANIZE ';
+
+     /*   IF @partitioncount > 1
+            SET @command = @command + N' PARTITION=' + CAST(@partitionnum AS nvarchar(10));*/
+        EXEC (@command);
+        PRINT N'Executed: ' + @command;
+    END;
+
+-- Close and deallocate the cursor.
+CLOSE partitiones;
+DEALLOCATE partitiones; 
+
+-- Drop the temporary table.
+DROP TABLE ##work_to_d;
+
+--exec [dbo].[SP_Index_ReOrg_New] @db='ssisdb'
+GO
+
+---====================================================================================================================================================================================================
+
+/******18 Object:  StoredProcedure [dbo].[sp_Sessions]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROC [dbo].[sp_Sessions]
+AS
+/**************************************************************************************************************
+**  Purpose: 
+**
+**  Revision History  
+**  
+**  Date			Author					Version				Revision  
+**  ----------		--------------------	-------------		-------------
+**  05/28/2013		Michael Rounds			1.0					New Proc, complete rewrite and replacement for old sp_query. 
+**																	Changes include displaying sessions with open transactions,new columns to output and SQL version specific logic
+**	07/23/2013		Michael Rounds			1.1					Tweaked to support Case-sensitive
+***************************************************************************************************************/
+SET NOCOUNT ON
+
+DECLARE @SQLVer NVARCHAR(20)
+
+SELECT @SQLVer = LEFT(CONVERT(NVARCHAR(20),SERVERPROPERTY('productversion')),4)
+
+IF CAST(@SQLVer AS NUMERIC(4,2)) < 11
+BEGIN
+		-- (SQL 2008R2 And Below)
+	EXEC sp_executesql
+	N'WITH SessionSQLText AS (
+	SELECT
+		r.session_id,
+		r.total_elapsed_time,
+		suser_name(r.user_id) as login_name,
+		r.wait_time,
+		r.last_wait_type,
+		COALESCE(SUBSTRING(qt.[text],(r.statement_start_offset / 2 + 1),LTRIM(LEN(CONVERT(NVARCHAR(MAX), qt.[text]))) * 2 - (r.statement_start_offset) / 2 + 1),'''') AS Formatted_SQL_Text,
+		COALESCE(qt.[text],'''') AS Raw_SQL_Text,
+		COALESCE(r.blocking_session_id,''0'',NULL) AS blocking_session_id,	
+		r.[status],
+		COALESCE(r.percent_complete,''0'',NULL) AS percent_complete
+	FROM sys.dm_exec_requests r (nolock)
+	CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) as qt
+	WHERE r.session_id <> @@SPID
+	)
+	SELECT DISTINCT
+		s.session_id AS Session_ID,
+		DB_NAME(sp.dbid) AS DBName,
+		COALESCE((ssq.total_elapsed_time/1000.0),0) as RunTime,
+		CASE WHEN COALESCE(REPLACE(s.login_name,'' '',''''),'''') = '''' THEN ssq.login_name ELSE s.login_name END AS Login_Name,
+		COALESCE(ssq.Formatted_SQL_Text,mrsh.[text]) AS Formatted_SQL_Text,
+		COALESCE(ssq.Raw_SQL_Text,mrsh.[text]) AS Raw_SQL_Text,
+		s.cpu_time AS CPU_Time,
+		s.logical_reads AS Logical_Reads,
+		s.reads AS Reads,
+		s.writes AS Writes,
+		ssq.wait_time AS Wait_Time,
+		ssq.last_wait_type AS Last_Wait_Type,
+		CASE WHEN COALESCE(ssq.[status],'''') = '''' THEN s.[status] ELSE ssq.[status] END AS [Status],
+		CASE WHEN ssq.blocking_session_id = ''0'' THEN NULL ELSE ssq.blocking_session_id END AS Blocking_Session_ID,		
+		CASE WHEN st.session_id = s.session_id THEN (SELECT COUNT(*) FROM sys.dm_tran_session_transactions WHERE session_id = s.session_id) ELSE 0 END AS Open_Transaction_Count,
+		CASE WHEN ssq.percent_complete = ''0'' THEN NULL ELSE ssq.percent_complete END AS Percent_Complete,
+		s.[host_name] AS [Host_Name],
+		ec.client_net_address AS Client_Net_Address,
+		s.[program_name] AS [Program_Name],
+		s.last_request_start_time as Start_Time,
+		s.login_time AS Login_Time,
+		GETDATE() AS DateStamp
+	INTO #TEMP
+	FROM sys.dm_exec_sessions s (nolock)
+	JOIN master..sysprocesses sp
+		ON s.session_id = sp.spid
+	LEFT OUTER
+	JOIN SessionSQLText ssq (nolock) 
+		ON ssq.session_id = s.session_id
+	LEFT OUTER 
+	JOIN sys.dm_tran_session_transactions st (nolock)
+		ON st.session_id = s.session_id
+	LEFT OUTER
+	JOIN sys.dm_tran_active_transactions at (nolock)
+		ON st.transaction_id = at.transaction_id
+	LEFT OUTER
+	JOIN sys.dm_tran_database_transactions dt
+		ON at.transaction_id = dt.transaction_id	
+	LEFT OUTER
+	JOIN sys.dm_exec_connections ec
+		ON s.session_id = ec.session_id
+	CROSS APPLY sys.dm_exec_sql_text(ec.most_recent_sql_handle) as mrsh;
+	WITH SessionInfo AS 
+	(
+	SELECT Session_ID,DBName,RunTime,Login_Name,Formatted_SQL_Text,Raw_SQL_Text,CPU_Time,
+		Logical_Reads,Reads,Writes,Wait_Time,Last_Wait_Type,[Status],Blocking_Session_ID,Open_Transaction_Count,Percent_Complete,[Host_Name],Client_Net_Address,
+		[Program_Name],Start_Time,Login_Time,DateStamp,ROW_NUMBER() OVER (ORDER BY Session_ID) AS RowNumber
+		FROM #TEMP
+	)
+	SELECT Session_ID,DBName,RunTime,Login_Name,Formatted_SQL_Text,Raw_SQL_Text,CPU_Time,
+		Logical_Reads,Reads,Writes,Wait_Time,Last_Wait_Type,[Status],Blocking_Session_ID,Open_Transaction_Count,Percent_Complete,[Host_Name],Client_Net_Address,
+		[Program_Name],Start_Time,Login_Time,DateStamp
+	FROM SessionInfo WHERE RowNumber IN (SELECT MIN(RowNumber) FROM SessionInfo GROUP BY Session_ID)
+	AND Session_ID > 50 
+	AND Session_ID <> @@SPID
+	AND RunTime > 300
+	ORDER BY Session_ID;
+
+	DROP TABLE #TEMP;'	
+END
+ELSE BEGIN
+		-- (SQL 2012 And Above)
+	EXEC sp_executesql
+	N'WITH SessionSQLText AS (
+	SELECT
+		r.session_id,
+		r.total_elapsed_time,
+		suser_name(r.user_id) as login_name,
+		r.wait_time,
+		r.last_wait_type,		
+		COALESCE(SUBSTRING(qt.[text],(r.statement_start_offset / 2 + 1),LTRIM(LEN(CONVERT(NVARCHAR(MAX), qt.[text]))) * 2 - (r.statement_start_offset) / 2 + 1),'''') AS Formatted_SQL_Text,
+		COALESCE(qt.[text],'''') AS Raw_SQL_Text,
+		COALESCE(r.blocking_session_id,''0'',NULL) AS blocking_session_id,	
+		r.[status],
+		COALESCE(r.percent_complete,''0'',NULL) AS percent_complete
+	FROM sys.dm_exec_requests r (nolock)
+	CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) as qt
+	WHERE r.session_id <> @@SPID
+	)
+	SELECT DISTINCT
+		s.session_id AS Session_ID,
+		DB_NAME(s.database_id) AS DBName,
+		COALESCE((ssq.total_elapsed_time/1000.0),0) as RunTime,
+		CASE WHEN COALESCE(REPLACE(s.login_name,'' '',''''),'''') = '''' THEN ssq.login_name ELSE s.login_name END AS Login_Name,
+		COALESCE(ssq.Formatted_SQL_Text,mrsh.[text]) AS Formatted_SQL_Text,
+		COALESCE(ssq.Raw_SQL_Text,mrsh.[text]) AS Raw_SQL_Text,
+		s.cpu_time AS CPU_Time,
+		s.logical_reads AS Logical_Reads,
+		s.reads AS Reads,
+		s.writes AS Writes,
+		ssq.wait_time AS Wait_Time,
+		ssq.last_wait_type AS Last_Wait_Type,
+		CASE WHEN COALESCE(ssq.[status],'''') = '''' THEN s.[status] ELSE ssq.[status] END AS [Status],
+		CASE WHEN ssq.blocking_session_id = ''0'' THEN NULL ELSE ssq.blocking_session_id END AS Blocking_Session_ID,
+		s.open_transaction_count AS Open_Transaction_Count,
+		CASE WHEN ssq.percent_complete = ''0'' THEN NULL ELSE ssq.percent_complete END AS Percent_Complete,
+		s.[host_name] AS [Host_Name],
+		ec.client_net_address AS Client_Net_Address,
+		s.[program_name] AS [Program_Name],
+		s.last_request_start_time as Start_Time,
+		s.login_time AS Login_Time,
+		GETDATE() AS DateStamp		
+	INTO #TEMP
+	FROM sys.dm_exec_sessions s (nolock)
+	LEFT OUTER
+	JOIN SessionSQLText ssq (nolock) 
+		ON ssq.session_id = s.session_id
+	LEFT OUTER 
+	JOIN sys.dm_tran_session_transactions st (nolock)
+		ON st.session_id = s.session_id
+	LEFT OUTER
+	JOIN sys.dm_tran_active_transactions at (nolock)
+		ON st.transaction_id = at.transaction_id
+	LEFT OUTER
+	JOIN sys.dm_tran_database_transactions dt
+		ON at.transaction_id = dt.transaction_id	
+	LEFT OUTER
+	JOIN sys.dm_exec_connections ec
+		ON s.session_id = ec.session_id
+	CROSS APPLY sys.dm_exec_sql_text(ec.most_recent_sql_handle) as mrsh;
+	WITH SessionInfo AS 
+	(
+	SELECT Session_ID,DBName,RunTime,Login_Name,Formatted_SQL_Text,Raw_SQL_Text,CPU_Time,
+		Logical_Reads,Reads,Writes,Wait_Time,Last_Wait_Type,[Status],Blocking_Session_ID,Open_Transaction_Count,Percent_Complete,[Host_Name],Client_Net_Address,
+		[Program_Name],Start_Time,Login_Time,DateStamp,ROW_NUMBER() OVER (ORDER BY Session_ID) AS RowNumber
+		FROM #TEMP
+	)
+	SELECT Session_ID,DBName,RunTime,Login_Name,Formatted_SQL_Text,Raw_SQL_Text,CPU_Time,
+		Logical_Reads,Reads,Writes,Wait_Time,Last_Wait_Type,[Status],Blocking_Session_ID,Open_Transaction_Count,Percent_Complete,[Host_Name],Client_Net_Address,
+		[Program_Name],Start_Time,Login_Time,DateStamp
+	FROM SessionInfo WHERE RowNumber IN (SELECT MIN(RowNumber) FROM SessionInfo GROUP BY Session_ID)
+	AND Session_ID > 50 
+	AND Session_ID <> @@SPID
+	AND RunTime > 300
+	ORDER BY Session_ID;
+	DROP TABLE #TEMP;'
+END
+GO
+
+----=============================================================================================================================================================================================
+
+/******19 Object:  StoredProcedure [dbo].[sp_ssis_startup]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+    CREATE PROCEDURE [dbo].[sp_ssis_startup]
+    AS
+    SET NOCOUNT ON
+        /* Currently, the IS Store name is 'SSISDB' */
+        IF DB_ID('SSISDB') IS NULL
+            RETURN
+
+        IF NOT EXISTS(SELECT name FROM [SSISDB].sys.procedures WHERE name=N'startup')
+            RETURN
+
+        /*Invoke the procedure in SSISDB  */
+        EXEC [SSISDB].[catalog].[startup] 
+GO
+
+
+----=============================================================================================================================================================================================
+
+
+/******20 Object:  StoredProcedure [dbo].[sp_who3]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[sp_who3]    
+(    
+ @filter tinyint = 1,    
+ @filterspid int = NULL    
+)    
+AS    
+SET NOCOUNT ON;    
+
+DECLARE @processes TABLE    
+  (    
+  spid int,    
+  blocked int,    
+  databasename varchar(256),    
+  hostname varchar(256),    
+  program_name varchar(256),    
+  loginame varchar(256),    
+  status varchar(60),    
+  cmd varchar(128),    
+  cpu int,    
+  physical_io int,    
+  [memusage] int,    
+  login_time datetime,    
+  last_batch datetime,    
+  current_statement_parent xml,
+  current_statement_sub xml)
+
+INSERT INTO @processes    
+SELECT	sub.*
+FROM
+(
+SELECT sp.spid,    
+  sp.blocked,    
+  sd.name,    
+  RTRIM(sp.hostname) AS hostname, 
+  RTRIM(sp.[program_name]) AS [program_name],    
+  RTRIM(sp.loginame) AS loginame,    
+  RTRIM(sp.status) AS status,    
+  sp.cmd,    
+  sp.cpu,    
+  sp.physical_io,    
+  sp.memusage,    
+  sp.login_time,    
+  sp.last_batch,
+  (
+    SELECT 
+		LTRIM(st.text) AS [text()]
+    FOR XML PATH(''), TYPE
+	) AS parent_text,  
+  (
+    SELECT 
+		LTRIM(CASE
+			WHEN LEN(COALESCE(st.text, '')) = 0 THEN NULL
+			ELSE SUBSTRING(st.text, (er.statement_start_offset/2)+1, 
+					((CASE er.statement_end_offset
+						WHEN -1 THEN DATALENGTH(st.text)
+						ELSE er.statement_end_offset
+						END - er.statement_start_offset)/2) + 1)  
+			END) AS [text()]
+	FROM sys.dm_exec_requests er CROSS APPLY sys.dm_exec_sql_text(er.sql_handle) AS st
+	WHERE er.session_id = sp.spid
+    FOR XML PATH(''), TYPE
+	) AS child_text
+FROM  sys.sysprocesses sp WITH (NOLOCK) LEFT JOIN sys.sysdatabases sd WITH (NOLOCK) ON sp.dbid = sd.dbid
+		CROSS APPLY sys.dm_exec_sql_text(sp.sql_handle) AS st
+) sub INNER JOIN sys.sysprocesses sp2 ON sub.spid = sp2.spid
+ORDER BY
+	sub.spid
+
+-- if specific spid required    
+IF @filterspid IS NOT NULL    
+ DELETE @processes    
+ WHERE spid <> @filterspid    
+
+-- remove system processes    
+IF @filter = 1 OR @filter = 2    
+ DELETE @processes    
+ WHERE spid < 51
+		OR spid = @@SPID 
+
+-- remove inactive processes    
+IF @filter = 2    
+ DELETE  @processes    
+ WHERE status = 'sleeping'    
+   AND cmd IN ('AWAITING COMMAND')    
+   AND blocked = 0    
+
+SELECT spid,    
+  blocked,    
+  databasename,    
+  hostname,    
+  loginame,    
+  status,    
+  current_statement_parent,
+  current_statement_sub,
+  cmd,    
+  cpu,    
+  physical_io,    
+  program_name,    
+  login_time,    
+  last_batch    
+FROM @processes    
+ORDER BY spid
+
+RETURN 0;    
+GO
+
+
+
+----===================================================================================================================================================================================================================
+
+
+/******21 Object:  StoredProcedure [dbo].[usp_GetErrorLogEvents]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+CREATE PROCEDURE  [dbo].[usp_GetErrorLogEvents] (@LogNumber int = 0, @runlocal int = 0, @NumberOfMinutes int = 5)
+AS
+--  Test Variables
+--declare @Lognumber smallint
+--declare @runlocal bit
+--set @Lognumber = 0
+--set @runlocal = 0
+--
+
+declare @count  smallint,
+        @SQL    varchar(1000),
+        @output varchar(255),
+		@runtime datetime,
+		@sqlversion varchar(10)
+
+set @count  = 0
+set @SQL    = ''
+set @output = ''
+set @sqlversion = rtrim(ltrim(substring(@@version, 22, 5)))
+set @runtime = getdate()
+
+if @runlocal = 1
+	set @runtime = getdate()-100
+
+
+if object_id('tempdb..#errors') is not null
+begin
+   drop table #errors
+end
+
+CREATE TABLE #errors
+(
+	RowID int IDENTITY PRIMARY KEY,
+	EntryTime datetime,
+	source varchar(50),
+	LogEntry varchar(4000)
+)
+ /*
+if @@version like '%2000%'
+begin
+	if object_id('tempdb..#errorlog') is not null
+	begin
+	   drop table #errorlog
+	end
+
+	create table #errorlog
+	(
+	   log_id          int identity primary key, 
+	   alert           char(5) default ' ',
+	   logentry       varchar(4000),
+	   continuationrow int
+	)
+
+	select @SQL = 'exec master..Sp_readerrorlog ' + convert(varchar(3),@lognumber)
+	insert into #errorlog (logentry, continuationrow)
+	execute (@SQL)
+
+	declare @loop int
+	declare @text varchar(3000)
+
+	select @loop = max(log_id)
+	from #errorlog
+	where continuationrow = 1
+
+	while @loop is not null
+	begin
+
+	select @text = null
+
+	select @text = logentry
+	from #errorlog
+	where log_id = @loop
+
+	update #errorlog
+	set logentry = logentry + @text
+	where log_id = @loop - 1
+
+	delete #errorlog where log_id = @loop
+
+	select @loop = max(log_id)
+	from #errorlog
+	where continuationrow = 1
+	and log_id < @loop
+
+	end
+
+	-- Mark interesting entries
+	update #errorlog
+	   set alert = '---->'
+	 where (logentry like '%err%'
+		or logentry like '%warn%'
+		or logentry like '%kill%'
+		or logentry like '%dead%'
+		or logentry like '%cannot%'
+		or logentry like '%could%'
+		or logentry like '%fail%'
+		or logentry like '%not%'
+		or logentry like '%stop%'
+		or logentry like '%terminate%'
+		or logentry like '%bypass%'
+		or logentry like '%roll%'
+		or logentry like '%truncate%'
+		or logentry like '%upgrade%'
+		or logentry like '%victim%'
+		or logentry like '%recover%'
+		or logentry like '%IO requests taking longer than%')
+		AND logentry not like '%errorlog%'
+		AND logentry not like '%dbcc%'
+
+	INSERT INTO #errors (entrytime, source, logentry)
+	-- Show each interesting entry
+	select
+		   CASE WHEN left(logentry, 3) = '200' THEN convert(datetime, substring(logentry, 0, 23))
+				ELSE NULL 
+			END AS EntryTime,
+		   CASE WHEN left(logentry, 3) = '200' THEN substring(logentry, 24, 10)
+				ELSE NULL 
+			END AS Source,
+		   CASE WHEN left(logentry, 3) = '200' THEN substring(logentry, 34, 300)
+				ELSE logentry 
+			END AS LogEntry
+	  from #errorlog
+	where Alert = '---->'
+
+	IF @RunLocal = 1
+	BEGIN
+		select * from #errorlog
+	END
+
+
+end -- SQL 2000
+else -- SQL 2005 */
+begin
+
+	select @SQL = 'exec master..xp_readerrorlog ' + convert(varchar(3),@lognumber)
+	insert into #errors (entrytime, source, logentry)
+	execute (@SQL)
+
+delete #errors 
+where (logentry not like '%err%'
+		AND logentry not like '%warn%'
+		AND logentry not like '%kill%'
+		AND logentry not like '%dead%'
+		AND logentry not like '%cannot%'
+		AND logentry not like '%could%'
+		AND logentry NOT like '%fail%'
+		AND logentry not like '%not%'
+		AND logentry not like '%stop%'
+		AND logentry not like '%terminate%'
+		AND logentry not like '%bypass%'
+		AND logentry not like '%roll%'
+		AND logentry not like '%Database Id = 154%'
+		AND logentry not like '%truncate%'
+		AND logentry not like '%Database Id = 5%'
+		AND logentry not like '%upgrade%'
+		AND logentry not like '%victim%'
+		AND logentry not like '%recover%'
+		AND logentry not like '%IO requests taking longer than%')
+		OR logentry like '%errorlog%'
+		OR logentry like '%dbcc%' 
+		OR logentry like '%TRUNCATE_ONLY%'
+		OR logentry like '%Log was backed up%'
+		OR logentry like '%SSPI handshake%'
+		OR logentry like '%18456%' 
+		OR logentry like '%18452%'  -- Login failed
+		OR logentry like '%17806%' -- SSPI handshake
+		OR logentry like '%17049%' --cycle error log
+		OR logentry like '%error log has been reinitialized%'
+		OR logentry like '%Attempting to cycle error log%'  
+		OR logentry like '%Changing the status to MERGE%'
+		OR logentry like '%Deleting unrecoverable checkpoint table row%'
+
+END
+
+DELETE #Errors 
+WHERE EntryTime IS NULL OR EntryTime <  dateadd(mi, (-1*@NumberOfMinutes), @runtime)
+
+-- If local only return the events table back to the Results Grid
+IF @RunLocal = 1
+BEGIN
+	SELECT *
+	FROM #errors
+END
+ELSE -- Insert the errors into the SystemEvents table to trigger notification.
+BEGIN
+
+	CREATE TABLE #Exceptions
+	(
+		RowID int identity Primary Key,
+		LogEntry varchar(4000),
+		EntryCount int,
+		LastOccurence datetime
+	)
+
+
+	INSERT INTO #Exceptions (LogEntry, EntryCount, LastOccurence)
+	SELECT LogEntry, count(*), max(EntryTime)
+	FROM #Errors
+	GROUP BY LogEntry
+
+		DECLARE @Loop2 int
+		DECLARE @Subject varchar(100)
+		DECLARE @strMsg varchar(4000)
+
+		SELECT @Subject = 'SQL Monitor Alert: ' + @@servername
+
+		SELECT @Loop2 = min(RowID)
+		FROM #Exceptions
+
+		WHILE @Loop2 IS NOT NULL
+		BEGIN
+
+			SELECT 	@strMsg =  convert(char(15),'LogEntry:') + isnull(LogEntry, 'Unknown') + char(10) +
+					convert(char(15),'EventTime:') + convert(varchar, LastOccurence) + char(10) +
+					convert(char(15),'') + char(10) +
+					convert(char(15),'') + 'This error has occured '+convert(varchar, EntryCount)+' times.'
+			FROM #Exceptions
+			WHERE RowID = @Loop2
+
+			--EXEC dbo.usp_SendEmailNotification @Subject, @strMsg
+			EXECUTE msdb.dbo.sp_send_dbmail 
+   @Recipients = 'SQLADMINS@friedkin.com',
+   @Subject = @Subject,
+   @Body = @strMsg
+   --@File_Attachments = @Attachment
+
+			SELECT @Loop2 = min(RowID)
+			FROM #Exceptions
+			WHERE RowID > @Loop2
+
+		END
+
+END
+
+DROP TABLE #Exceptions
+DROP TABLE #Errors
+
+
+
+
+--exec [dbo].[usp_GetErrorLogEvents]
+
+
+
+
+
+
+GO
+
+----=============================================================================================================================================================================================
+
+
+
+/******22 Object:  StoredProcedure [dbo].[usp_GetRAM]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[usp_GetRAM]
+AS
+Insert into tblRAM_CPU (Physical_Memory_GB, Virtual_Memory_GB, CPU)
+Select 
+                (physical_memory_kb/1024/1024)  Physical_Memory_GB,
+                (virtual_memory_kb /1024/1024)  Virtual_Memory_GB,
+		cpu_count CPU
+ from sys.dm_os_sys_info
+GO
+
+
+----=============================================================================================================================================================================================
+
+/******23 Object:  StoredProcedure [dbo].[usp_GetServerInfo]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+CREATE PROCEDURE [dbo].[usp_GetServerInfo]
+AS
+CREATE TABLE #ServerDetails(ID int,  Name  sysname, Internal_Value int, Value nvarchar(512))
+INSERT #ServerDetails EXEC master.dbo.xp_msver
+
+DECLARE @InstanceName nvarchar(50)
+DECLARE @value VARCHAR(100)
+DECLARE @RegKey_InstanceName nvarchar(500)
+DECLARE @RegKey nvarchar(500)
+DECLARE @AuditLevel int
+DECLARE @DataDirectory nvarchar(500)
+DECLARE @LogDirectory nvarchar(500)
+DECLARE @BackupDirectory nvarchar(500)
+
+SET @InstanceName=CONVERT(nVARCHAR,isnull(SERVERPROPERTY('INSTANCENAME'),
+'MSSQLSERVER'))
+
+if(SELECT Convert(varchar(1),(SERVERPROPERTY('ProductVersion'))))<>8
+BEGIN
+SET @RegKey_InstanceName='SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+
+EXECUTE xp_regread
+  @rootkey = 'HKEY_LOCAL_MACHINE',
+  @key = @RegKey_InstanceName,
+  @value_name = @InstanceName,
+  @value = @value OUTPUT
+
+SET @RegKey='SOFTWARE\Microsoft\Microsoft SQL Server\'+@value+'\MSSQLServer\'
+
+
+EXEC master..xp_regread 
+  @rootkey='HKEY_LOCAL_MACHINE',
+  @key=@RegKey,
+  @value_name='AuditLevel',
+  @value=@AuditLevel OUTPUT
+
+EXEC master..xp_regread 
+  @rootkey='HKEY_LOCAL_MACHINE',
+  @key=@RegKey,
+  @value_name='DefaultData',
+  @value=@DataDirectory OUTPUT
+
+EXEC master..xp_regread 
+  @rootkey='HKEY_LOCAL_MACHINE',
+  @key=@RegKey,
+  @value_name='DefaultLog',
+  @value=@LogDirectory OUTPUT
+
+EXEC master..xp_regread 
+  @rootkey='HKEY_LOCAL_MACHINE',
+  @key=@RegKey,
+  @value_name='BackupDirectory',
+  @value=@BackupDirectory OUTPUT
+
+END
+
+SELECT  SERVERPROPERTY('ComputerNamePhysicalNetBIOS') [Machine Name]
+    ,SERVERPROPERTY('ServerName') AS [SQL Server Name]
+    ,SERVERPROPERTY('InstanceName') AS [Instance Name]
+    ,SERVERPROPERTY('Collation') AS [Server Collation]
+    ,'Microsoft SQL Server ' + CAST(SERVERPROPERTY('Edition') AS varchar(250)) AS Edition
+    ,SERVERPROPERTY('ProductLevel') AS [Product Level]
+    ,(SELECT Value FROM #ServerDetails WHERE Name = N'Language') AS [Language]
+    ,(SELECT Value FROM #ServerDetails WHERE Name = N'Platform') AS [Platform]
+    ,(SELECT 'Microsoft Windows NT ' + Value from #ServerDetails where Name = N'WindowsVersion') AS [Operating System]
+    ,(SELECT Internal_Value FROM #ServerDetails WHERE Name = N'ProcessorCount') AS [Processors]
+    ,(SELECT CAST(Internal_Value AS varchar)+ ' (MB)' FROM #ServerDetails WHERE Name = N'PhysicalMemory') AS Memory
+    , CASE WHEN SERVERPROPERTY('IsClustered') = 1 THEN 'True' ELSE 'False' END AS IsClustered
+    ,(SELECT value from sys.configurations where name='min server memory (MB)') AS 'Min Server Memory (MB)'
+    ,(SELECT value from sys.configurations where name='max server memory (MB)') AS 'Max Server Memory (MB)'
+    ,(SELECT CASE WHEN value=0 THEN 'True' ELSE 'False' END from sys.configurations where name='affinity mask') AS 'Automatically set processor affinity mask for all processor'
+    ,(SELECT CASE WHEN value=0 THEN 'True' ELSE 'False' END from sys.configurations where name='affinity I/O mask') AS 'Automatically set I/O affinity mask for all processor'
+    ,CASE WHEN SERVERPROPERTY('IsIntegratedSecurityOnly')= 1 THEN 'Windows Authentication Mode' 
+    WHEN SERVERPROPERTY('IsIntegratedSecurityOnly')= 0 THEN 'SQL Server and Windows Authentication Mode' END AS [Server Authentication]
+    ,CASE WHEN @AuditLevel = 0 THEN 'None' 
+    WHEN @AuditLevel = 1 THEN 'Successful Logins Only'
+    WHEN @AuditLevel = 2 THEN 'Failed Logins Only'
+    WHEN @AuditLevel = 3 THEN 'Both Failed and Successful Logins'
+    END AS [Audit Level]
+    ,(select CASE WHEN value = 0 THEN 'False' WHEN value = 1 THEN 'True' END from sys.configurations where name='remote access') AS 'Allow remote connections to this Server'
+    ,(select CASE WHEN value = 0 THEN 'unlimited' ELSE value END from sys.configurations where name='user connections') AS 'Max number of concurrent Connections'
+    ,(select CASE WHEN value = 0 THEN 'No Timeout' ELSE value END from sys.configurations where name='remote query timeout (s)') AS 'Query Timeout (s)'
+    ,(select CASE WHEN value = 0 THEN 'False' WHEN value = 1 THEN 'True' END from sys.configurations where name='remote access') AS 'Allow Remote Connections to this server'
+    ,@DataDirectory AS 'Default Data Directory'
+    ,@LogDirectory AS 'Default Log Directory'
+    ,@BackupDirectory AS 'Default Backup Directory'
+    ,(SELECT value from sys.configurations WHERE name='max degree of parallelism') AS 'Max Degree of Parallelism'
+    ,(SELECT value from sys.configurations WHERE name='remote login timeout (s)') AS 'Remote Login Timeout (s)'
+    ,(SELECT CASE WHEN value = 0 THEN 'False' WHEN value = 1 THEN 'True' END from sys.configurations WHERE name='scan for startup procs') AS 'Scan for Startup Procs'
+
+DROP TABLE #ServerDetails
+GO
+
+---=============================================================================================================================================================================================================
+
+/****** Object:  StoredProcedure [dbo].[usp_MissingIndexes]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[usp_MissingIndexes]
+AS 
+/************************************************************************************
+
+CREATE TABLE tblMissingIndexes (SrNo INT IDENTITY(1,1), ServerName NVARCHAR(500),
+								DBName NVARCHAR(128) NOT NULL,
+                                ObjName NVARCHAR(128) NOT NULL,
+                                EqualityColumns NVARCHAR(4000) NULL,
+                                InequalityColumns NVARCHAR(4000) NULL,
+                                IncludedColumns NVARCHAR(4000) NULL,
+                                [Statement] NVARCHAR(4000) NULL,
+                                UserCompiles BIGINT NULL,
+                                UserSeeks BIGINT NULL,
+                                UserScans BIGINT NULL,
+                                LastUserSeek DATETIME NULL,
+                                LastUserScan DATETIME NULL,
+                                AvgTotalUserCost FLOAT NULL,
+                                AvgUserImpact FLOAT NULL,
+                                CreateIndexStmt NVARCHAR(4000))
+GO
+
+***************************************************************************************/
+SET NOCOUNT ON;
+
+DECLARE @missingIndexes TABLE ( dbName NVARCHAR(128) NOT NULL,
+                                objName NVARCHAR(128) NOT NULL,
+                                equalityColumns NVARCHAR(4000) NULL,
+                                inequalityColumns NVARCHAR(4000) NULL,
+                                includedColumns NVARCHAR(4000) NULL,
+                                [statement] NVARCHAR(4000) NULL,
+                                userCompiles BIGINT NULL,
+                                userSeeks BIGINT NULL,
+                                userScans BIGINT NULL,
+                                lastUserSeek DATETIME NULL,
+                                lastUserScan DATETIME NULL,
+                                avgTotalUserCost FLOAT NULL,
+                                avgUserImpact FLOAT NULL,
+                                createIndexStmt NVARCHAR(4000));
+
+DECLARE @db NVARCHAR(128), @sql NVARCHAR(MAX);
+
+DECLARE cuDb CURSOR LOCAL FAST_FORWARD 
+FOR SELECT  name 
+    FROM    master.sys.databases 
+    WHERE   state_desc = N'ONLINE' AND 
+            is_in_standby = 0;
+
+OPEN cuDb;
+
+FETCH NEXT FROM cuDb INTO @db;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    SET @sql =  N'USE [' + @db + N']; 
+                SELECT  DB_NAME() AS dbName,
+                        OBJECT_NAME(d.[object_id], d.database_id) AS objName,
+                        ISNULL(d.equality_columns, N''''),
+                        ISNULL(d.inequality_columns, N''''),
+                        ISNULL(d.included_columns, N''''),
+                        d.[statement],
+                        s.unique_compiles,
+                        s.user_seeks,
+                        s.user_scans,
+                        s.last_user_seek,
+                        s.last_user_scan,
+                        s.avg_total_user_cost,
+                        s.avg_user_impact,
+                        N''USE ['' + DB_NAME() + N'']; CREATE NONCLUSTERED INDEX [ix'' + 
+                            OBJECT_NAME(d.[object_id], d.database_id) + N''_missing] ON '' + 
+                            OBJECT_NAME(d.[object_id], d.database_id) + N'' ('' + 
+                            CASE WHEN d.equality_columns IS NULL THEN d.inequality_columns
+                                 WHEN d.inequality_columns IS NULL THEN d.equality_columns
+                                 ELSE d.equality_columns + N'', '' + d.inequality_columns END + 
+                            N'') '' + 
+                            CASE WHEN d.included_columns IS NULL THEN N'' ''
+                                 ELSE N''INCLUDE ('' + d.included_columns + N'') '' END + 
+                            N''ON [default];'' AS createIndexStmt
+                FROM    master.sys.dm_db_missing_index_groups AS g
+                            INNER JOIN master.sys.dm_db_missing_index_group_stats AS s
+                            ON g.index_group_handle = s.group_handle
+                            INNER JOIN master.sys.dm_db_missing_index_details AS d
+                            ON g.index_handle = d.index_handle
+                WHERE   OBJECTPROPERTY(d.[object_id], N''IsMSShipped'') = 0 AND 
+                        OBJECTPROPERTY(d.[object_id], N''IsSystemTable'') = 0
+                ORDER BY
+                        DB_NAME(),
+                        OBJECT_NAME(d.[object_id], d.database_id);';
+
+    INSERT  @missingIndexes
+    (       dbName,
+            objName,
+            equalityColumns,
+            inequalityColumns,
+            includedColumns,
+            [statement],
+            userCompiles,
+            userSeeks,
+            userScans,
+            lastUserSeek,
+            lastUserScan,
+            avgTotalUserCost,
+            avgUserImpact,
+            createIndexStmt)
+    EXEC sp_executesql @stmt = @sql;
+
+    FETCH NEXT FROM cuDb INTO @db;
+END
+
+CLOSE cuDb;
+DEALLOCATE cuDb;
+
+Insert INTO tblMissingIndexes
+(	ServerName,
+	DBName,
+	ObjName,
+	EqualityColumns,
+	InequalityColumns,
+	IncludedColumns,
+	[Statement],
+	UserCompiles,
+	UserSeeks,
+	UserScans,
+	LastUserSeek,
+	LastUserScan,
+	AvgTotalUserCost,
+	AvgUserImpact,
+	CreateIndexStmt
+	)
+
+SELECT  @@ServerName ServerName, dbName DBName,
+        ObjName ObjectName,
+        EqualityColumns,
+        InequalityColumns,
+        IncludedColumns,
+        [Statement],
+        UserCompiles,
+        UserSeeks,
+        UserScans,
+        LastUserSeek,
+        LastUserScan,
+        AvgTotalUserCost,
+        AvgUserImpact,
+        CreateIndexStmt
+FROM    @missingIndexes
+ORDER BY
+        dbName,
+        objName;
+GO
+
+
+
+----===================================================================================================================================
+
+/******25 Object:  StoredProcedure [dbo].[usp_User_Entitlements]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+CREATE PROCEDURE  [dbo].[usp_User_Entitlements]
+AS
+
+SET NOCOUNT ON
+/*
+drop table tblEntitlement
+select * from tblEntitlement
+truncate table tblEntitlement
+drop table ##USER_ROLES
+CREATE TABLE  tblEntitlement
+(
+      intID INT IDENTITY(1,1),
+      servername VARCHAR(500),
+      dbname VARCHAR(1000),
+      lname VARCHAR(1000),
+      uname VARCHAR(1000),
+      dbrole VARCHAR(1000),
+      cr_date VARCHAR(100),
+      upd_date VARCHAR(100),
+      deny_login VARCHAR(100),
+      hasaccess VARCHAR(100),
+      isntname VARCHAR(100),
+      isntgroup VARCHAR(100),
+      isntuser VARCHAR(100),
+      sysadmin VARCHAR(100),
+      securityadmin VARCHAR(100),
+      serveradmin VARCHAR(100),
+      setupadmin VARCHAR(100),
+      processadmin VARCHAR(100),
+      diskadmin VARCHAR(100),
+      dbcreator VARCHAR(100)
+)
+*/
+
+--PRINT 'SQL SECURITY ENTITLEMENT REPORT (VERSION 1.5)'
+--PRINT '--------------------------------'
+--PRINT 'CREATED  ON: '+CONVERT(varchar , getdate(), 120) 
+--PRINT 'CREATED  BY: "'+SYSTEM_USER+'"'
+--PRINT 'SERVER NAME: "'+@@SERVERNAME+'"'
+--PRINT char(10)+@@VERSION+char(10)
+--    PRINT ' Notes:  1. If an ID in this report is identified incorrectly as a functional ID, please notify the Distributed Database Security Administration group.'
+--    PRINT '         2. Modifications to an ID may include password , default database or code page change.'+char(10)
+
+CREATE TABLE #DB_USER (database_name varchar(100), login_name varchar(100)) 
+
+EXEC sp_MSforeachdb @command1 = 'insert into #DB_USER select ''?'', l.loginname from [?].[dbo].[sysusers] u, [master].[dbo].[syslogins] l where u.sid=l.sid'
+
+DECLARE @login sysname
+DECLARE @role VARCHAR(100)
+DECLARE LOGINS CURSOR LOCAL READ_ONLY
+FOR
+      SELECT loginname
+      FROM master.dbo.syslogins
+      ORDER BY loginname
+
+OPEN LOGINS
+
+CREATE TABLE ##USER_ROLES
+(
+      dbname VARCHAR(100),
+      lname VARCHAR(100),
+      uname VARCHAR(100),
+      dbrole VARCHAR(1000),
+      expermflg SMALLINT
+)
+
+DECLARE @LOGIN_INFO TABLE
+(
+            log_name VARCHAR(100),
+            cr_date DATETIME,
+            upd_date DATETIME,
+            dbs_name VARCHAR(100),
+            deny_login TINYINT,
+            hasaccess TINYINT,
+            isntname TINYINT,
+            isntgroup TINYINT,
+            isntuser TINYINT,
+            sysadmin TINYINT,
+            securityadmin TINYINT,
+            serveradmin TINYINT,
+            setupadmin TINYINT,
+            processadmin TINYINT,
+            diskadmin TINYINT,
+            dbcreator TINYINT
+)
+
+FETCH NEXT FROM LOGINS INTO @login
+
+WHILE ( @@FETCH_STATUS >= 0 )
+BEGIN
+    DECLARE @createdate datetime
+    DECLARE @updatedate datetime
+    DECLARE @dbname sysname
+    DECLARE @denylogin int
+    DECLARE @hasaccess int
+    DECLARE @isntname int
+    DECLARE @isntgroup int
+    DECLARE @isntuser int
+    DECLARE @sysadmin int
+    DECLARE @securityadmin int
+    DECLARE @serveradmin int
+    DECLARE @setupadmin int
+    DECLARE @processadmin int
+    DECLARE @diskadmin int
+    DECLARE @dbcreator int
+
+--   IF @denylogin=1 PRINT ' Access to SQL Server "'+@@SERVERNAME+'" was denyed to "'+@login+'"'
+--   IF @isntname=1  PRINT ' Access to SQL Server "'+@@SERVERNAME+'" is trusted, by using NT authentication'
+--   IF @isntname=0  PRINT ' The "'+@login+'" is SQL Server account and can be used only as a Functional ID.'
+--   IF @isntgroup=1 PRINT ' The "'+@login+'" is Domain Group.'
+--   IF @isntuser=1  PRINT ' The "'+@login+'" is domain account can be used only as a Functional ID.'
+
+      INSERT INTO @LOGIN_INFO
+      SELECT
+            @login,
+            createdate, 
+            updatedate, 
+            dbname, 
+            denylogin,
+            hasaccess, 
+            isntname, 
+            isntgroup,
+            isntuser, 
+            sysadmin, 
+            securityadmin, 
+            serveradmin,
+            setupadmin, 
+            processadmin, 
+            diskadmin, 
+            dbcreator
+      FROM master.dbo.syslogins
+      WHERE loginname = @login
+
+      SELECT
+            @createdate=createdate, 
+            @updatedate=updatedate, 
+            @dbname=dbname, 
+            @denylogin=denylogin, 
+            @hasaccess=hasaccess, 
+            @isntname=isntname, 
+            @isntgroup=isntgroup,
+            @isntuser=isntuser, 
+            @sysadmin=sysadmin, 
+            @securityadmin=securityadmin, 
+            @serveradmin=serveradmin,
+            @setupadmin=setupadmin, 
+            @processadmin=processadmin, 
+            @diskadmin=diskadmin, 
+            @dbcreator=dbcreator
+    FROM master.dbo.syslogins
+    WHERE loginname = @login
+
+--    PRINT '---------------------------------------------------------'
+--    PRINT 'SECURITY CONFIGURATION OF SQL LOGIN: "'+@login+'"'
+--    PRINT '---------------------------------------------------------'
+--    PRINT '1. SYSTEM SECURITY CONFIGURATION' + char(10)
+--    PRINT ' Account name:   "'+@login+'" '
+--    PRINT ' Date created:   '+CONVERT(varchar , @createdate, 120)+
+--        + ' Date last modified:   '+CONVERT(varchar , @updatedate, 120)+char(10)
+--    PRINT ' Default database is set to ['+@dbname+'].'+char(10)
+--   IF @denylogin=1 PRINT ' Access to SQL Server "'+@@SERVERNAME+'" was denyed to "'+@login+'"'
+--   IF @isntname=1  PRINT ' Access to SQL Server "'+@@SERVERNAME+'" is trusted, by using NT authentication'
+--   IF @isntname=0  PRINT ' The "'+@login+'" is SQL Server account and can be used only as a Functional ID.'
+--   IF @isntgroup=1 PRINT ' The "'+@login+'" is Domain Group.'
+--   IF @isntuser=1  PRINT ' The "'+@login+'" is domain account can be used only as a Functional ID.'
+--   PRINT ''
+--    IF (@sysadmin+@securityadmin+@serveradmin+@setupadmin+@processadmin+@diskadmin+@dbcreator>0)
+--    BEGIN
+--          PRINT ' This ID has the following SQL Server Roles:'
+--          IF @sysadmin=1      PRINT '   - member of the [sysadmin] server role.'
+--          IF @securityadmin=1 PRINT '   - member of the [securityadmin] server role.'
+--          IF @serveradmin=1   PRINT '   - member of the [serveradmin] fixed server role.'
+--          IF @setupadmin=1    PRINT '   - member of the [setupadmin] fixed server role.'
+--          IF @processadmin=1  PRINT '   - member of the [processadmin] fixed server role.'
+--          IF @diskadmin=1     PRINT '   - member of the [diskadmin] fixed server role.'
+--          IF @dbcreator=1     PRINT '   - member of the [dbcreator] fixed server role.'
+--    END
+--   ELSE
+--    BEGIN
+--          PRINT ' The "'+@login+'" is not listed as member of any SQL Server Role'
+--    END
+
+   IF (SELECT COUNT(*) FROM #DB_USER WHERE login_name=@login)>0
+    BEGIN
+--    PRINT char(10)+'2. DATABASE SECURITY CONFIGURATION'+char(10)
+
+    DECLARE @database sysname
+    DECLARE DATABASES CURSOR LOCAL READ_ONLY
+    FOR 
+    SELECT DISTINCT d.[name] 
+    FROM master.dbo.sysdatabases d, #DB_USER u 
+    WHERE d.[name]=u.database_name 
+    AND u.login_name = @login 
+    ORDER BY [name]
+
+    OPEN DATABASES
+
+    FETCH NEXT FROM DATABASES INTO @database
+
+    WHILE ( @@FETCH_STATUS >= 0 )
+      BEGIN
+--       PRINT char(10)+Char(10)+'Database name: ['+@database+']'
+
+       EXEC('
+            DECLARE @name sysname;
+            DECLARE @role sysname;
+            DECLARE @explicit_flag SMALLINT;
+
+            SET @role = '' '';      
+
+            SELECT 
+                  @name = U.name
+            FROM ['+@database+'].[dbo].[sysusers] U, [master].[dbo].[syslogins] L 
+            WHERE U.sid = L.sid
+            AND L.loginname = '''+@login+''';
+
+            SELECT @role = @role + '', '' + g.name                
+            FROM ['+@database+'].[dbo].[sysusers] u, ['+@database+'].[dbo].[sysusers] g, ['+@database+'].[dbo].[sysmembers] m 
+            WHERE g.uid = m.groupuid 
+            AND u.uid = m.memberuid 
+            AND u.name = @name;
+
+            SET @role = (
+                                          CASE 
+                                                WHEN LEN(LTRIM(RTRIM(@role))) > 0 
+                                                      THEN LTRIM(RIGHT(@role, LEN(@role) -2))
+                                                ELSE
+                                                      '' ''
+                                          END
+                              )
+
+--          SELECT @role = LTRIM(RIGHT(@role, LEN(@role) -1))
+
+      SET @explicit_flag = (SELECT COUNT(*) FROM ['+@database+'].[dbo].[sysprotects] where uid = USER_ID(@name))
+
+      INSERT INTO ##USER_ROLES
+      VALUES (''' + @database + ''', ''' + @login + ''', @name, @role, @explicit_flag);
+
+	IF @name is NULL PRINT '' Account ['+@login+'] is not the user in the database ['+@database+'].'' 
+--        ELSE 
+--          BEGIN 
+--                IF @name<>''dbo''
+--                      BEGIN PRINT ''The account has access to the database and registred as the user [''+@name+'']'';
+--                            IF '''+@login+''' <> @name PRINT '' !!! VIOLATION !!! Account name is different from database user name.'';
+--                      END 
+--            ELSE 
+--                      PRINT ''The account ['+@login+'] is the database owner'';
+--    Commented to remove additional recordsets in output Sunil 09/19/2006          
+--                      SELECT ''   User [''+@name+''] is the member of [''+g.name+''] database role'' 
+--                      FROM ['+@database+'].[dbo].[sysusers] u, ['+@database+'].[dbo].[sysusers] g, ['+@database+'].[dbo].[sysmembers] m 
+--                      WHERE g.uid = m.groupuid 
+--                      AND u.uid = m.memberuid 
+--                      AND u.name = @name;
+
+--            IF (SELECT COUNT(*) FROM ['+@database+'].[dbo].[sysprotects] where uid = USER_ID(@name))>0 
+--                BEGIN
+--                      PRINT ''!!! VIOLATION !!! user [''+@name+''] has explicit priviliges on database objects''; 
+--
+--              SELECT ''           ''+(CASE protecttype
+--                                   WHEN 205 THEN ''GRANT ''
+--                                   WHEN 206 THEN ''DENY ''
+--                                        END)+ (CASE action
+--                                                                WHEN 26  THEN ''REFERENCES''
+--                                                                WHEN 178 THEN ''CREATE FUNCTION''
+--                                                                WHEN 193 THEN ''SELECT''
+--                                                                WHEN 195 THEN ''INSERT''
+--                                                                WHEN 196 THEN ''DELETE''
+--                                                                WHEN 197 THEN ''UPDATE'' 
+--                                                                WHEN 198 THEN ''CREATE TABLE''
+--                                                                WHEN 203 THEN ''CREATE DATABASE''
+--                                                                WHEN 207 THEN ''CREATE VIEW'' 
+--                                                                WHEN 222 THEN ''CREATE PROCEDURE'' 
+--                                                                WHEN 224 THEN ''EXECUTE'' 
+--                                                                WHEN 228 THEN ''BACKUP DATABASE'' 
+--                                                                WHEN 233 THEN ''CREATE DEFAULT'' 
+--                                                                WHEN 235 THEN ''BACKUP LOG'' 
+--                                                                WHEN 236 THEN ''CREATE RULE'' 
+--                                                    END)+'' ON [''+ user_name(o.uid)+''].[''+ o.name+''] TO [''+USER_NAME(p.uid)+'']''
+--              FROM dbo.sysprotects p, dbo.sysobjects o, sysusers u WHERE o.id = p.id and p.uid = u.uid and u.issqlrole=0 and u.name=@name
+--           END
+--          END)
+      ')
+
+     FETCH NEXT FROM DATABASES INTO @database
+    END
+
+   CLOSE    DATABASES
+   DEALLOCATE     DATABASES
+
+   END
+   FETCH NEXT FROM LOGINS INTO @login
+  END
+CLOSE       LOGINS
+DEALLOCATE  LOGINS
+
+DROP TABLE #DB_USER
+
+--PRINT ''
+--PRINT 'SQL SECURITY ENTITLEMENT REPORT (VERSION 1.5)'
+--PRINT '--------------------------------'
+--PRINT 'CREATED  ON: '+CONVERT(varchar , getdate(), 120) 
+--PRINT 'CREATED  BY: "'+SYSTEM_USER+'"'
+--PRINT 'SERVER NAME: "'+@@SERVERNAME+'"'
+
+INSERT INTO tblEntitlement
+(
+	servername,
+	dbname,
+	lname,
+	uname,
+	dbrole,
+	cr_date,
+	upd_date,
+	deny_login,
+	hasaccess,
+	isntname,
+	isntgroup,
+	isntuser,
+	sysadmin,
+	securityadmin,
+	serveradmin,
+	setupadmin,
+	processadmin,
+	diskadmin,
+	dbcreator
+)
+
+SELECT
+      CAST(@@ServerName AS VARCHAR),
+      LTRIM(RTRIM(a.dbname)), 
+      LTRIM(RTRIM(b.log_name)), 
+      LTRIM(RTRIM(a.uname)), 
+      LTRIM(RTRIM(a.dbrole)), 
+      LTRIM(RTRIM(b.cr_date)), 
+      LTRIM(RTRIM(b.upd_date)), 
+      LTRIM(RTRIM(b.deny_login)), 
+      LTRIM(RTRIM(b.hasaccess)), 
+      LTRIM(RTRIM(b.isntname)), 
+      LTRIM(RTRIM(b.isntgroup)), 
+      LTRIM(RTRIM(b.isntuser)), 
+      LTRIM(RTRIM(b.sysadmin)), 
+      LTRIM(RTRIM(b.securityadmin)), 
+      LTRIM(RTRIM(b.serveradmin)), 
+      LTRIM(RTRIM(b.setupadmin)), 
+      LTRIM(RTRIM(b.processadmin)), 
+      LTRIM(RTRIM(b.diskadmin)), 
+      LTRIM(RTRIM(b.dbcreator))
+FROM
+      ##USER_ROLES a
+--      , @LOGIN_INFO b where a.lname = b.log_name
+RIGHT OUTER JOIN  @LOGIN_INFO b on a.lname = b.log_name
+
+--SELECT * FROM @LOGIN_INFO ORDER BY log_name
+--SELECT * FROM ##USER_ROLES ORDER BY lname
+DROP TABLE ##USER_ROLES
+
+GO
+
+-----==================================================================================================================================================================
+
+
+
+/****** Object:  StoredProcedure [dbo].[usp_Worst_TSQL]    Script Date: 8/23/2022 8:02:29 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROC [dbo].[usp_Worst_TSQL] 
+/*
+
+
+Name: usp_Worst_TSQL
+Description: This stored procedure displays the top worst performing queries based on CPU, Execution Count, 
+             I/O and Elapsed_Time as identified using DMV information.  This can be display the worst 
+             performing queries from an instance, or database perspective.   The number of records shown,
+             the database, and the sort order are identified by passing pararmeters.
+
+Parameters:  There are three different parameters that can be passed to this procedures: @DBNAME, @COUNT
+             and @ORDERBY.  The @DBNAME is used to constraint the output to a specific database.  If  
+             when calling this SP this parameter is set to a specific database name then only statements 
+             that are associated with that database will be displayed.  If the @DBNAME parameter is not set
+             then this SP will return rows associated with any database.  The @COUNT parameter allows you 
+             to control the number of rows returned by this SP.  If this parameter is used then only the 
+             TOP x rows, where x is equal to @COUNT will be returned, based on the @ORDERBY parameter.
+             The @ORDERBY parameter identifies the sort order of the rows returned in descending order.  
+             This @ORDERBY parameters supports the following type: CPU, AE, TE, EC or AIO, TIO, ALR, TLR, ALW, TLW, APR, 
+
+and TPR 
+             where "ACPU" represents Average CPU Usage
+                   "TCPU" represents Total CPU usage 
+                   "AE"   represents Average Elapsed Time
+                   "TE"   represents Total Elapsed Time
+                   "EC"   represents Execution Count
+                   "AIO"  represents Average IOs
+                   "TIO"  represents Total IOs 
+                   "ALR"  represents Average Logical Reads
+                   "TLR"  represents Total Logical Reads              
+                   "ALW"  represents Average Logical Writes
+                   "TLW"  represents Total Logical Writes
+                   "APR"  represents Average Physical Reads
+                   "TPR"  represents Total Physical Read
+
+Typical execution calls
+
+   Top 6 statements in the AdventureWorks database base on Average CPU Usage:
+      EXEC usp_Worst_TSQL @DBNAME='AdventureWorks',@COUNT=6,@ORDERBY='ACPU';
+
+   Top 100 statements order by Average IO 
+      EXEC usp_Worst_TSQL @COUNT=100,@ORDERBY='ALR'; 
+
+   Show top all statements by Average IO 
+      EXEC usp_Worst_TSQL;
+
+*/
+
+
+(--@DBNAME VARCHAR(128) = ''
+ @COUNT INT = 999999999
+ ,@ORDERBY VARCHAR(4) = 'AIO')
+AS
+-- Check for valid @ORDERBY parameter
+IF ((SELECT CASE WHEN 
+          @ORDERBY in ('ACPU','TCPU','AE','TE','EC','AIO','TIO','ALR','TLR','ALW','TLW','APR','TPR') 
+             THEN 1 ELSE 0 END) = 0)
+BEGIN 
+   -- abort if invalid @ORDERBY parameter entered
+   RAISERROR('@ORDERBY parameter not APCU, TCPU, AE, TE, EC, AIO, TIO, ALR, TLR, ALW, TLW, APR or TPR',11,1)
+   RETURN
+ END
+ SELECT TOP (@COUNT) 
+        @@ServerName ServerName,  
+	COALESCE(DB_NAME(st.dbid), 
+                  DB_NAME(CAST(pa.value AS INT))+'*', 
+                 'Resource') AS [Database Name]  
+         -- find the offset of the actual statement being executed
+         ,SUBSTRING(text, 
+                   CASE WHEN statement_start_offset = 0 
+                          OR statement_start_offset IS NULL  
+                           THEN 1  
+                           ELSE statement_start_offset/2 + 1 END, 
+                   CASE WHEN statement_end_offset = 0 
+                          OR statement_end_offset = -1  
+                          OR statement_end_offset IS NULL  
+                           THEN LEN(text)  
+                           ELSE statement_end_offset/2 END - 
+                     CASE WHEN statement_start_offset = 0 
+                            OR statement_start_offset IS NULL 
+                             THEN 1  
+                             ELSE statement_start_offset/2  END + 1 
+                  )  AS [Statement]  
+         ,OBJECT_SCHEMA_NAME(st.objectid,dbid) [Schema Name] 
+         ,OBJECT_NAME(st.objectid,dbid) [Object Name]   
+         ,objtype [Cached Plan objtype] 
+         ,execution_count [Execution Count]  
+         ,(total_logical_reads + total_logical_writes + total_physical_reads )/execution_count [Average IOs] 
+         ,total_logical_reads + total_logical_writes + total_physical_reads [Total IOs]  
+         ,total_logical_reads/execution_count [Avg Logical Reads] 
+         ,total_logical_reads [Total Logical Reads]  
+         ,total_logical_writes/execution_count [Avg Logical Writes]  
+         ,total_logical_writes [Total Logical Writes]  
+         ,total_physical_reads/execution_count [Avg Physical Reads] 
+         ,total_physical_reads [Total Physical Reads]   
+         ,total_worker_time / execution_count [Avg CPU] 
+         ,total_worker_time [Total CPU] 
+         ,total_elapsed_time / execution_count [Avg Elapsed Time] 
+         ,total_elapsed_time  [Total Elasped Time] 
+         ,last_execution_time [Last Execution Time]  
+    FROM sys.dm_exec_query_stats qs  
+    JOIN sys.dm_exec_cached_plans cp ON qs.plan_handle = cp.plan_handle 
+    CROSS APPLY sys.dm_exec_sql_text(qs.plan_handle) st 
+    OUTER APPLY sys.dm_exec_plan_attributes(qs.plan_handle) pa 
+    WHERE attribute = 'dbid' AND OBJECT_NAME(st.objectid,dbid) not in ('usp_Worst_TSQL')
+
+	 /*  
+     CASE when @DBNAME = '' THEN ''
+                               ELSE COALESCE(DB_NAME(st.dbid), 
+                                          DB_NAME(CAST(pa.value AS INT)) + '*', 
+                                          'Resource') END
+                                    IN (RTRIM(@DBNAME),RTRIM(@DBNAME) + '*')  */
+
+    ORDER BY CASE 
+                WHEN @ORDERBY = 'ACPU' THEN total_worker_time / execution_count 
+                WHEN @ORDERBY = 'TCPU'  THEN total_worker_time
+                WHEN @ORDERBY = 'AE'   THEN total_elapsed_time / execution_count
+                WHEN @ORDERBY = 'TE'   THEN total_elapsed_time  
+                WHEN @ORDERBY = 'EC'   THEN execution_count
+                WHEN @ORDERBY = 'AIO'  THEN (total_logical_reads + total_logical_writes + total_physical_reads) / 
+
+execution_count  
+                WHEN @ORDERBY = 'TIO'  THEN total_logical_reads + total_logical_writes + total_physical_reads
+                WHEN @ORDERBY = 'ALR'  THEN total_logical_reads  / execution_count
+                WHEN @ORDERBY = 'TLR'  THEN total_logical_reads 
+                WHEN @ORDERBY = 'ALW'  THEN total_logical_writes / execution_count
+                WHEN @ORDERBY = 'TLW'  THEN total_logical_writes  
+                WHEN @ORDERBY = 'APR'  THEN total_physical_reads / execution_count 
+                WHEN @ORDERBY = 'TPR'  THEN total_physical_reads
+           END DESC
+GO
+
+
+444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444
+-----BLOKING HISTORY----
+
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The WAITTYPE oUSE [SSA]
+GO
+
+/****** Object:  Table [dbo].[BlockingHistory]    Script Date: 10/17/2022 5:54:19 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[BlockingHistory](
+	[BlockingHistoryID] [int] IDENTITY(1,1) NOT NULL,
+	[DateStamp] [datetime] NOT NULL,
+	[Blocked_SPID] [smallint] NOT NULL,
+	[Blocking_SPID] [smallint] NOT NULL,
+	[Blocked_Login] [nvarchar](128) NOT NULL,
+	[Blocked_HostName] [nvarchar](128) NOT NULL,
+	[Blocked_WaitTime_Seconds] [numeric](12, 2) NULL,
+	[Blocked_LastWaitType] [nvarchar](32) NOT NULL,
+	[Blocked_Status] [nvarchar](30) NOT NULL,
+	[Blocked_Program] [nvarchar](128) NOT NULL,
+	[Blocked_SQL_Text] [nvarchar](max) NULL,
+	[Offending_SPID] [smallint] NOT NULL,
+	[Offending_Login] [nvarchar](128) NOT NULL,
+	[Offending_NTUser] [nvarchar](128) NOT NULL,
+	[Offending_HostName] [nvarchar](128) NOT NULL,
+	[Offending_WaitType] [bigint] NOT NULL,
+	[Offending_LastWaitType] [nvarchar](32) NOT NULL,
+	[Offending_Status] [nvarchar](30) NOT NULL,
+	[Offending_Program] [nvarchar](128) NOT NULL,
+	[Offending_SQL_Text] [nvarchar](max) NULL,
+	[DBName] [nvarchar](128) NULL,
+ CONSTRAINT [pk_BlockingHistory] PRIMARY KEY CLUSTERED 
+(
+	[BlockingHistoryID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[BlockingHistory] ADD  CONSTRAINT [DF_BlockingHistory_DateStamp]  DEFAULT (getdate()) FOR [DateStamp]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The PK on the table' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'BlockingHistoryID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The datestamp on when the data was collected' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'DateStamp'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The SPID of the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_SPID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The SPID of the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocking_SPID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Login name of the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_Login'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The hostname of the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_HostName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The time in seconds the victim session was being blocked' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_WaitTime_Seconds'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Last WAITTYPE of the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_LastWaitType'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Status of the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_Status'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The program used by the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_Program'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The SQL text run by the victim session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Blocked_SQL_Text'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DUPLICATE - The SPID of the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_SPID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Login ' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_Login'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The NTUser of the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_NTUser'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The hostname of the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_HostName'
+GOf the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_WaitType'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Last WAITTYPE of the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_LastWaitType'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Status of the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_Status'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The program used by the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_Program'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The SQL Text run by the offending session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'Offending_SQL_Text'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The Database where the blocking occured' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory', @level2type=N'COLUMN',@level2name=N'DBName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Contains history on blocking sessions and the victims' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'BlockingHistory'
+GO
+
+
+-----CPUStatsHistory---------
+
+
+
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[CPUStatsHistory]    Script Date: 10/17/2022 6:12:33 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[CPUStatsHistory](
+	[CPUStatsHistoryID] [int] IDENTITY(1,1) NOT NULL,
+	[SQLProcessPercent] [int] NULL,
+	[SystemIdleProcessPercent] [int] NULL,
+	[OtherProcessPerecnt] [int] NULL,
+	[DateStamp] [datetime] NOT NULL,
+ CONSTRAINT [PK_CPUStatsHistory] PRIMARY KEY CLUSTERED 
+(
+	[CPUStatsHistoryID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[CPUStatsHistory] ADD  CONSTRAINT [DF_CPUStatsHistory_DateStamp]  DEFAULT (getdate()) FOR [DateStamp]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Primary Key' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'CPUStatsHistory', @level2type=N'COLUMN',@level2name=N'CPUStatsHistoryID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Percentage of SQL Server process' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'CPUStatsHistory', @level2type=N'COLUMN',@level2name=N'SQLProcessPercent'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Percentage of system idle process' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'CPUStatsHistory', @level2type=N'COLUMN',@level2name=N'SystemIdleProcessPercent'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Percentage all other system processes' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'CPUStatsHistory', @level2type=N'COLUMN',@level2name=N'OtherProcessPerecnt'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Datestamp when record was inserted' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'CPUStatsHistory', @level2type=N'COLUMN',@level2name=N'DateStamp'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'History table on CPU statistics' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'CPUStatsHistory'
+GO
+
+
+
+---------------PerfStatsHistory  ---------------------------
+
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[PerfStatsHistory]    Script Date: 10/17/2022 6:14:15 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[PerfStatsHistory](
+	[PerfStatsHistoryID] [int] IDENTITY(1,1) NOT NULL,
+	[BufferCacheHitRatio] [numeric](38, 13) NULL,
+	[PageLifeExpectency] [bigint] NULL,
+	[BatchRequestsPerSecond] [bigint] NULL,
+	[CompilationsPerSecond] [bigint] NULL,
+	[ReCompilationsPerSecond] [bigint] NULL,
+	[UserConnections] [bigint] NULL,
+	[LockWaitsPerSecond] [bigint] NULL,
+	[PageSplitsPerSecond] [bigint] NULL,
+	[ProcessesBlocked] [bigint] NULL,
+	[CheckpointPagesPerSecond] [bigint] NULL,
+	[StatDate] [datetime] NOT NULL,
+ CONSTRAINT [PK_PerfStatsHistory] PRIMARY KEY CLUSTERED 
+(
+	[PerfStatsHistoryID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[PerfStatsHistory] ADD  CONSTRAINT [DF_PerfStatsHistory_StatDate]  DEFAULT (getdate()) FOR [StatDate]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The PK on the table' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'PerfStatsHistoryID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'How often SQL Server is able data pages in its buffer cache' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'BufferCacheHitRatio'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The life expectancy of hte page' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'PageLifeExpectency'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of batches SQL Server is receiving per second' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'BatchRequestsPerSecond'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of compilations per second' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'CompilationsPerSecond'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of recompilations per second' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'ReCompilationsPerSecond'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of users connected' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'UserConnections'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of lock waits per second' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'LockWaitsPerSecond'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of page splits per second' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'PageSplitsPerSecond'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of processes blocked' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'ProcessesBlocked'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of checkpoint pages per second' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'CheckpointPagesPerSecond'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The timestamp the data was gathered' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory', @level2type=N'COLUMN',@level2name=N'StatDate'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Contains statistics on ' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'PerfStatsHistory'
+GO
+
+
+----------SchemaChangeLog---------------
+
+
+
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[SchemaChangeLog]    Script Date: 10/17/2022 6:16:15 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[SchemaChangeLog](
+	[SchemaChangeLogID] [int] IDENTITY(1,1) NOT NULL,
+	[CreateDate] [datetime] NULL,
+	[LoginName] [sysname] NULL,
+	[ComputerName] [sysname] NULL,
+	[DBName] [sysname] NOT NULL,
+	[SQLEvent] [sysname] NOT NULL,
+	[Schema] [sysname] NULL,
+	[ObjectName] [sysname] NULL,
+	[SQLCmd] [nvarchar](max) NULL,
+	[XmlEvent] [xml] NOT NULL,
+ CONSTRAINT [PK_SchemaChangeLog] PRIMARY KEY CLUSTERED 
+(
+	[SchemaChangeLogID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Primary Key' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'SchemaChangeLogID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The date and time the DDL change occurred.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'CreateDate'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Login of who made the DDL change' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'LoginName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Name of computer that made the DDL change' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'ComputerName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Name of the database' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'DBName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Specifies what type of change, IE ALTER_PROCEDURE, CREATE_FUNCTION, etc' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'SQLEvent'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The schema to which the changed object belongs.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'Schema'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The name of the object' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'ObjectName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The sql text that was run' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'SQLCmd'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The raw XML data generated by database trigger.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog', @level2type=N'COLUMN',@level2name=N'XmlEvent'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Database trigger to audit all of the DDL changes made to the database.' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'SchemaChangeLog'
+GO
+
+
+-----------QueryHistory-------------
+
+
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[QueryHistory]    Script Date: 10/17/2022 6:15:18 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[QueryHistory](
+	[QueryHistoryID] [int] IDENTITY(1,1) NOT NULL,
+	[DateStamp] [datetime] NOT NULL,
+	[Login_Time] [datetime] NULL,
+	[Start_Time] [datetime] NULL,
+	[RunTime] [numeric](20, 4) NULL,
+	[Session_ID] [smallint] NOT NULL,
+	[CPU_Time] [bigint] NULL,
+	[Reads] [bigint] NULL,
+	[Writes] [bigint] NULL,
+	[Logical_Reads] [bigint] NULL,
+	[Host_Name] [nvarchar](128) NULL,
+	[DBName] [nvarchar](128) NULL,
+	[Login_Name] [nvarchar](128) NOT NULL,
+	[Formatted_SQL_Text] [nvarchar](max) NULL,
+	[SQL_Text] [nvarchar](max) NULL,
+	[Program_Name] [nvarchar](128) NULL,
+	[Blocking_Session_ID] [smallint] NULL,
+	[Status] [nvarchar](50) NULL,
+	[Open_Transaction_Count] [int] NULL,
+	[Percent_Complete] [numeric](12, 2) NULL,
+	[Client_Net_Address] [nvarchar](20) NULL,
+	[Wait_Time] [int] NULL,
+	[Last_Wait_Type] [nvarchar](60) NULL,
+ CONSTRAINT [pk_QueryHistory] PRIMARY KEY CLUSTERED 
+(
+	[QueryHistoryID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The PK on the table' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'QueryHistoryID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The timestamp the data was collected' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'DateStamp'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The timestamp of when the user logged in' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Login_Time'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The timestamp of when the last query started' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Start_Time'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The length of time the active session has been running' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'RunTime'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The SPID of the query' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Session_ID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The amount of CPU cycles the query has performed' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'CPU_Time'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of reads the query performed' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Reads'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of writes the query performed' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Writes'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of physical reads the query performed' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Logical_Reads'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The host name the query originated from' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Host_Name'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The name of the database' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'DBName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The login name that ran the query' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Login_Name'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The formatted SQL Text of the query' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Formatted_SQL_Text'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The raw SQL Text of the query' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'SQL_Text'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The name of the program that initiated the query' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Program_Name'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The session_id that is blocking the sessions query' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Blocking_Session_ID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The current status of the session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Status'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The number of transactions currently open for the session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Open_Transaction_Count'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The progress of the session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Percent_Complete'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The IP address of the client that initiated the session' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory', @level2type=N'COLUMN',@level2name=N'Client_Net_Address'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Storage for long running queries' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'QueryHistory'
+GO
+
+
+
+-----DICTIONARY
+
+
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[DataDictionary_Tables]    Script Date: 10/10/2022 10:41:48 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[DataDictionary_Tables](
+	[SchemaName] [sysname] NOT NULL,
+	[TableName] [sysname] NOT NULL,
+	[TableDescription] [varchar](4000) NOT NULL,
+ CONSTRAINT [PK_DataDictionary_Tables] PRIMARY KEY CLUSTERED 
+(
+	[SchemaName] ASC,
+	[TableName] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[DataDictionary_Tables] ADD  CONSTRAINT [DF_DataDictionary_TableDescription]  DEFAULT ('') FOR [TableDescription]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Schema Name' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'DataDictionary_Tables', @level2type=N'COLUMN',@level2name=N'SchemaName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Table Name' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'DataDictionary_Tables', @level2type=N'COLUMN',@level2name=N'TableName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Table Description' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'DataDictionary_Tables', @level2type=N'COLUMN',@level2name=N'TableDescription'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'List of tables' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'DataDictionary_Tables'
+GO
+
+
+---Jobstatistshistory----
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[JobStatsHistory]    Script Date: 10/17/2022 9:28:46 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[JobStatsHistory](
+	[JobStatsHistoryId] [int] IDENTITY(1,1) NOT NULL,
+	[JobStatsID] [int] NULL,
+	[JobStatsDateStamp] [datetime] NOT NULL,
+	[JobName] [nvarchar](255) NULL,
+	[Owner] [nvarchar](255) NULL,
+	[Category] [nvarchar](255) NULL,
+	[Enabled] [int] NULL,
+	[StartTime] [datetime] NULL,
+	[StopTime] [datetime] NULL,
+	[AvgRunTime] [numeric](12, 2) NULL,
+	[LastRunTime] [numeric](12, 2) NULL,
+	[RunTimeStatus] [nvarchar](30) NULL,
+	[LastRunOutcome] [nvarchar](20) NULL,
+ CONSTRAINT [pk_JobStatsHistory] PRIMARY KEY CLUSTERED 
+(
+	[JobStatsHistoryId] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[JobStatsHistory] ADD  CONSTRAINT [DF_JobStatsHistory_JobStatsDateStamp]  DEFAULT (getdate()) FOR [JobStatsDateStamp]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The PK on the table' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'JobStatsHistoryId'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The grouping ID for all records gathered for that time stamp' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'JobStatsID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The datestamp that the job stats were gathered' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'JobStatsDateStamp'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The name of the SQL Job' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'JobName'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The category of the job' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'Category'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Stores the status of the job, enabled or disabled' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'Enabled'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The time the SQL Job started' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'StartTime'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The time the SQL Job stopped' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'StopTime'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The average runtime of the SQL Job' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'AvgRunTime'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The last time the SQL Job was run' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'LastRunTime'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Whether the job is currently running or not (at the time the information was gathered)' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'RunTimeStatus'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The outcome of the SQL Job, whether is succeeded or failed' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory', @level2type=N'COLUMN',@level2name=N'LastRunOutcome'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Contains statistical inforamtion on SQL Jobs' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'JobStatsHistory'
+GO
+
+
+
+
+----MemoryUsageHistory---
+
+USE [SSA]
+GO
+
+
+/****** Object:  Table [dbo].[MemoryUsageHistory]    Script Date: 10/10/2022 10:38:43 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[MemoryUsageHistory](
+	[MemoryUsageHistoryID] [int] IDENTITY(1,1) NOT NULL,
+	[DateStamp] [datetime] NOT NULL,
+	[SystemPhysicalMemoryMB] [nvarchar](20) NULL,
+	[SystemVirtualMemoryMB] [nvarchar](20) NULL,
+	[DBUsageMB] [nvarchar](20) NULL,
+	[DBMemoryRequiredMB] [nvarchar](20) NULL,
+	[BufferCacheHitRatio] [nvarchar](20) NULL,
+	[BufferPageLifeExpectancy] [nvarchar](20) NULL,
+	[BufferPoolCommitMB] [nvarchar](20) NULL,
+	[BufferPoolCommitTgtMB] [nvarchar](20) NULL,
+	[BufferPoolTotalPagesMB] [nvarchar](20) NULL,
+	[BufferPoolDataPagesMB] [nvarchar](20) NULL,
+	[BufferPoolFreePagesMB] [nvarchar](20) NULL,
+	[BufferPoolReservedPagesMB] [nvarchar](20) NULL,
+	[BufferPoolStolenPagesMB] [nvarchar](20) NULL,
+	[BufferPoolPlanCachePagesMB] [nvarchar](20) NULL,
+	[DynamicMemConnectionsMB] [nvarchar](20) NULL,
+	[DynamicMemLocksMB] [nvarchar](20) NULL,
+	[DynamicMemSQLCacheMB] [nvarchar](20) NULL,
+	[DynamicMemQueryOptimizeMB] [nvarchar](20) NULL,
+	[DynamicMemHashSortIndexMB] [nvarchar](20) NULL,
+	[CursorUsageMB] [nvarchar](20) NULL,
+ CONSTRAINT [pk_MemoryUsageHistory] PRIMARY KEY CLUSTERED 
+(
+	[MemoryUsageHistoryID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[MemoryUsageHistory] ADD  CONSTRAINT [DF_MemoryUsageHistory_DateStamp]  DEFAULT (getdate()) FOR [DateStamp]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Primary Key' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'MemoryUsageHistoryID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Datestamp when record was inserted' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DateStamp'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'SystemPhysicalMemoryMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'SystemPhysicalMemoryMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'SystemVirtualMemoryMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'SystemVirtualMemoryMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DBUsageMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DBUsageMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DBMemoryRequiredMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DBMemoryRequiredMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferCacheHitRatio' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferCacheHitRatio'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPageLifeExpectancy' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPageLifeExpectancy'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolCommitMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolCommitMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolCommitTgtMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolCommitTgtMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolTotalPagesMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolTotalPagesMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolDataPagesMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolDataPagesMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolFreePagesMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolFreePagesMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolReservedPagesMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolReservedPagesMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolStolenPagesMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolStolenPagesMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'BufferPoolPlanCachePagesMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'BufferPoolPlanCachePagesMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DynamicMemConnectionsMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DynamicMemConnectionsMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DynamicMemLocksMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DynamicMemLocksMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DynamicMemSQLCacheMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DynamicMemSQLCacheMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DynamicMemQueryOptimizeMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DynamicMemQueryOptimizeMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'DynamicMemHashSortIndexMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'DynamicMemHashSortIndexMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'CursorUsageMB' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory', @level2type=N'COLUMN',@level2name=N'CursorUsageMB'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'History table on memory usage statistics' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'MemoryUsageHistory'
+GO
+
+
+
+
+
+
+-------Healph check report-----
+
+USE [SSA]
+GO
+
+/****** Object:  Table [dbo].[HealthReport]    Script Date: 10/10/2022 10:37:59 AM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[HealthReport](
+	[HealthReportID] [int] IDENTITY(1,1) NOT NULL,
+	[DateStamp] [datetime] NOT NULL,
+	[GeneratedHTML] [nvarchar](max) NULL,
+ CONSTRAINT [PK_HealthReport] PRIMARY KEY CLUSTERED 
+(
+	[HealthReportID] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[HealthReport] ADD  CONSTRAINT [DF_HealthReport_datestamp]  DEFAULT (getdate()) FOR [DateStamp]
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The PK for the HealthReport' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'HealthReport', @level2type=N'COLUMN',@level2name=N'HealthReportID'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The datestamp the HealthReport was generated' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'HealthReport', @level2type=N'COLUMN',@level2name=N'DateStamp'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'The HTML blob that represents the HealthReport' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'HealthReport', @level2type=N'COLUMN',@level2name=N'GeneratedHTML'
+GO
+
+EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'Storage for historical generated HealthReports' , @level0type=N'SCHEMA',@level0name=N'dbo', @level1type=N'TABLE',@level1name=N'HealthReport'
+GO
